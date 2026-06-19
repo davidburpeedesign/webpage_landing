@@ -160,6 +160,10 @@
   <script type="module">
     import * as THREE from "three";
     import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+    import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+    import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+    import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+    import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
     const REDUCE = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -215,14 +219,15 @@
         maxTips:    REDUCE ? 45 : 80,  // safety cap on simultaneous tips per network
         maxPts:     REDUCE ? 800 : 1600,
         decayPerSec: 0.4,              // growth-trail fade
-        labelProb:  0.12,              // chance a new endpoint emits a data label
+        labelProb:  0.22,              // chance a new endpoint emits a data label
       },
       rotation: {
         steer: 0.55, ease: 0.045,
         idleSpeed: REDUCE ? 0 : 0.04,               // mechanical drift, no idle on reduced
       },
       breathing: { amp: REDUCE ? 0 : 0.01, speed: 0.7 },
-      labels: { max: 14, life: [2.2, 4.0] },
+      labels: { max: 38, life: [2.2, 4.2] },         // more data modules on the sphere
+      bloom:  { strength: 0.62, radius: 0.45, threshold: 0.2 }, // subtle neon glow on paths
     };
 
     // weighted heat picker
@@ -249,6 +254,20 @@
 
     const sculpture = new THREE.Group();
     scene.add(sculpture);
+
+    // Post-processing: subtle bloom gives the bright additive paths a neon
+    // glow. Threshold sits above the void (#222) and the near-zero wireframe,
+    // so only the luminous paths smear — the background stays clean.
+    const _sz = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const composerTarget = new THREE.WebGLRenderTarget(_sz.x, _sz.y, { type: THREE.HalfFloatType, samples: 4 });
+    const composer = new EffectComposer(renderer, composerTarget);
+    composer.addPass(new RenderPass(scene, camera));
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      CONFIG.bloom.strength, CONFIG.bloom.radius, CONFIG.bloom.threshold
+    );
+    composer.addPass(bloomPass);
+    composer.addPass(new OutputPass());
 
     /* ============================================================
        Geodesic icosphere — Class-I subdivision at arbitrary frequency.
@@ -697,7 +716,7 @@
       dotsT += dt;
       if (dotsT > 0.4) { dotsT = 0; r.dots.textContent = ".".repeat((r.dots.textContent.length % 3) + 1); }
 
-      renderer.render(scene, camera);
+      composer.render();
       requestAnimationFrame(animate);
     }
     animate();
@@ -706,6 +725,7 @@
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
     });
   </script>
 </body>
