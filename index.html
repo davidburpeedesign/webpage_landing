@@ -196,19 +196,30 @@
           { c: MX.amber,  w: 0.10 },
         ],
       },
-      // Emergent multi-agent growth: few origins, each seeding walker agents
-      // that crawl the wireframe, claim nodes, and branch into sprawling networks.
-      net: {
-        maxActive:  REDUCE ? 2 : 4,    // concurrent origins/networks
-        spawnEvery: REDUCE ? [2.0, 4.0] : [0.9, 2.4],
-        speed:      7,                 // edges traversed per second per agent
-        seedAgents: 3,                 // initial walkers fired from an origin
-        branchProb: 0.46,              // chance to spawn a child at each junction
-        maxAgents:  REDUCE ? 18 : 40,  // cap on simultaneous walkers per network
-        maxGen:     90,                // growth depth before an agent retires
-        forwardBias: 0.7,              // 0=random turns, 1=keep heading outward
+      // Surface-constrained branching growth. Tips step in free bend
+      // directions and snap back onto the sphere (geo1 = the surface), so
+      // growth is NOT locked to the wireframe lattice — organic, non-uniform.
+      growth: {
+        maxActive:  REDUCE ? 2 : 3,    // concurrent growing networks (origins)
+        spawnEvery: REDUCE ? [2.2, 4.5] : [1.2, 3.0],
+        stepEvery:  0.045,             // seconds per breadth-first growth tick
+        segLength:  0.16,              // local segment length
+        bendDeg:    28,                // local bend angle (left/right)
+        probBend:   0.5,               // per-side bend probability
+        probStraight: 0.8,             // straight-continuation probability
+        clearanceFactor: 0.6,          // clearance = factor * segLength (spacing/forks)
+        reconnectAmt: 0.2,             // chance a near-miss bridges the network instead
+        angleSlackDeg: 14,             // tolerance on the realized segment angle
+        edgeTol:    0.5,               // off-surface reject (inert on a closed sphere)
+        maxGen:     70,                // branch depth before a tip retires
+        seedTips:   4,                 // initial tips fired from an origin
+        seedSpread: 0.5,               // radians of jitter on the seed fan
+        maxTips:    REDUCE ? 45 : 80,  // safety cap on simultaneous tips per network
+        maxPts:     REDUCE ? 800 : 1600,
+        decayPerSec: 0.4,              // growth-trail fade
+        labelProb:  0.12,              // chance a new endpoint emits a data label
       },
-      energy: { decayPerSec: 0.24 },
+      energy: { decayPerSec: 0.24 },   // wireframe hover-glow fade
       hover:  { radius: 0.92, strength: 0.9 },
       rotation: {
         steer: 0.55, ease: 0.045,
@@ -358,97 +369,183 @@
 
     function setEdgeHot(ei, c) { const o = ei * 3; edgeHot[o] = c.r; edgeHot[o + 1] = c.g; edgeHot[o + 2] = c.b; }
 
-    // Deposit energy on the edge a→b (must be adjacent), tinting it with a heat color.
-    function lightEdge(a, b, heat, intensity) {
-      const ei = edgeMap.get(edgeKey(a, b));
-      if (ei === undefined) return;
-      if (intensity > edgeEnergy[ei]) { edgeEnergy[ei] = intensity; setEdgeHot(ei, heat); }
-      if (0.75 > nodeEnergy[a]) nodeEnergy[a] = 0.75;
-      const ne = intensity * 0.9;
-      if (ne > nodeEnergy[b]) nodeEnergy[b] = ne;
-    }
-
     /* ============================================================
-       Emergent multi-agent growth.
-       A "network" begins at one origin and fires several walker agents.
-       Each agent crawls edge-to-edge; at every node it claims unvisited
-       neighbours, continues toward the one that best keeps its heading
-       (forwardBias), and may spawn child agents down the other branches.
-       Result: a few origins sprawling into complex dendritic networks.
+       Surface-constrained branching growth (free-form on the sphere).
+       Tips step in their own bend directions and snap back onto the
+       sphere surface (geo1), so growth is NOT locked to the wireframe
+       lattice. Each network generates its own glowing geometry that
+       fades as a trail. Adapted from a per-frame Houdini growth solver:
+       breadth-first (every live tip advances one step per tick, then
+       retires), with boundary/angle gates, reconnection, and sibling
+       overlap guards. The sphere makes closest_point/normal analytic.
        ============================================================ */
-    const networks = [];
-    const _dir = new THREE.Vector3(), _cand = new THREE.Vector3();
+    const R = CONFIG.sphere.radius;
+    const G = CONFIG.growth;
+    const clearance  = G.clearanceFactor * G.segLength;
+    const bendAngle  = THREE.MathUtils.degToRad(G.bendDeg);
+    const angleSlack = THREE.MathUtils.degToRad(G.angleSlackDeg);
 
-    function makeAgent(cur, target, gen) { return { cur, target, t: 0, gen, dead: false }; }
+    // ---- generated-line ring buffer (additive, fades to invisible) ----
+    const GROW_CAP = 6000;
+    const growPos  = new Float32Array(GROW_CAP * 2 * 3);
+    const growCol  = new Float32Array(GROW_CAP * 2 * 3);
+    const segEnergy = new Float32Array(GROW_CAP);
+    const segHeat   = new Float32Array(GROW_CAP * 3);
+    const growGeo = new THREE.BufferGeometry();
+    growGeo.setAttribute("position", new THREE.BufferAttribute(growPos, 3));
+    growGeo.setAttribute("color", new THREE.BufferAttribute(growCol, 3));
+    growGeo.setDrawRange(0, 0);
+    const growLines = new THREE.LineSegments(growGeo, new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    sculpture.add(growLines);
+    let segCursor = 0, segMax = 0, posDirty = false;
 
-    function spawnNetwork() {
-      if (networks.length >= CONFIG.net.maxActive) return;
-      const origin = (Math.random() * nodeCount) | 0;
-      const net = { origin, heat: pickHeat(), visited: new Set([origin]), agents: [] };
-      // fire seed walkers down distinct edges out of the origin
-      const nbrs = adjacency[origin].slice();
-      for (let i = nbrs.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [nbrs[i], nbrs[j]] = [nbrs[j], nbrs[i]]; }
-      const seeds = Math.min(CONFIG.net.seedAgents, nbrs.length);
-      for (let i = 0; i < seeds; i++) {
-        net.visited.add(nbrs[i]);                 // reserve target so seeds diverge
-        net.agents.push(makeAgent(origin, nbrs[i], 0));
-      }
-      if (net.agents.length === 0) return;
-      networks.push(net);
-      maybeLabel(origin);
+    function addSegment(p1, p2, heat, energy) {
+      const s = segCursor;
+      segCursor = (segCursor + 1) % GROW_CAP;
+      if (s + 1 > segMax) segMax = s + 1;
+      const o6 = s * 6, o3 = s * 3;
+      growPos[o6] = p1.x; growPos[o6 + 1] = p1.y; growPos[o6 + 2] = p1.z;
+      growPos[o6 + 3] = p2.x; growPos[o6 + 4] = p2.y; growPos[o6 + 5] = p2.z;
+      segHeat[o3] = heat.r; segHeat[o3 + 1] = heat.g; segHeat[o3 + 2] = heat.b;
+      segEnergy[s] = energy;
+      posDirty = true;
     }
 
-    // Pick the unvisited neighbour of `node` that best continues travel from `prev`.
-    function chooseForward(node, prev, candidates) {
-      _dir.subVectors(nodes[node], nodes[prev]).normalize();
-      let best = candidates[0], bestScore = -Infinity;
-      for (const c of candidates) {
-        _cand.subVectors(nodes[c], nodes[node]).normalize();
-        const score = _dir.dot(_cand) * CONFIG.net.forwardBias + Math.random() * (1 - CONFIG.net.forwardBias);
-        if (score > bestScore) { bestScore = score; best = c; }
+    // Only ACTIVELY GROWING networks are tracked. Once a network saturates
+    // (no live tips) it is dropped — its segments keep fading in the ring buffer.
+    const networks = [];
+    const _N = new THREE.Vector3(), _seg = new THREE.Vector3();
+    const _target = new THREE.Vector3(), _pt2 = new THREE.Vector3(), _up = new THREE.Vector3();
+
+    const cellOf = (p) => `${Math.round(p.x / clearance)},${Math.round(p.y / clearance)},${Math.round(p.z / clearance)}`;
+    function addPoint(net, pos, parentIdx) {
+      const idx = net.pts.length;
+      net.pts.push(pos);
+      net.parent.push(parentIdx);
+      const key = cellOf(pos);
+      let cell = net.hash.get(key);
+      if (!cell) { cell = []; net.hash.set(key, cell); }
+      cell.push(idx);
+      return idx;
+    }
+    // nearest network point within `clearance` of pos, excluding self/parent/grandparent
+    function nearestPoint(net, pos, exA, exB, exC) {
+      const cx = Math.round(pos.x / clearance), cy = Math.round(pos.y / clearance), cz = Math.round(pos.z / clearance);
+      let best = -1, bestD = clearance;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const cell = net.hash.get(`${cx + dx},${cy + dy},${cz + dz}`);
+        if (!cell) continue;
+        for (const idx of cell) {
+          if (idx === exA || idx === exB || idx === exC) continue;
+          const d = net.pts[idx].distanceTo(pos);
+          if (d < bestD) { bestD = d; best = idx; }
+        }
       }
       return best;
     }
 
-    function advanceNetworks(dt) {
-      for (let ni = networks.length - 1; ni >= 0; ni--) {
-        const net = networks[ni];
-        const agents = net.agents;
-        for (let ai = agents.length - 1; ai >= 0; ai--) {
-          const ag = agents[ai];
-          ag.t += CONFIG.net.speed * dt;
-          // glow grows along the edge the head is currently crossing
-          lightEdge(ag.cur, ag.target, net.heat, Math.min(1, ag.t + 0.25));
-          while (ag.t >= 1 && !ag.dead) {
-            ag.t -= 1;
-            lightEdge(ag.cur, ag.target, net.heat, 1);   // edge fully traversed
-            const arrived = ag.target, prev = ag.cur;
-            ag.cur = arrived;
-            if (Math.random() < 0.18) maybeLabel(arrived);
-            // unvisited neighbours become this network's frontier
-            const cands = [];
-            for (const n of adjacency[arrived]) if (!net.visited.has(n)) cands.push(n);
-            if (cands.length === 0 || ag.gen >= CONFIG.net.maxGen) { ag.dead = true; break; }
-            const primary = chooseForward(arrived, prev, cands);
-            net.visited.add(primary);
-            ag.target = primary; ag.gen++;
-            // branch into the remaining frontier edges
-            for (const c of cands) {
-              if (c === primary || agents.length >= CONFIG.net.maxAgents) continue;
-              if (Math.random() < CONFIG.net.branchProb) {
-                net.visited.add(c);
-                agents.push(makeAgent(arrived, c, ag.gen));
-              }
-            }
-          }
-        }
-        // prune dead agents; retire the network once nothing is growing
-        net.agents = agents.filter((a) => !a.dead);
-        if (net.agents.length === 0) networks.splice(ni, 1);
+    function spawnGrowth() {
+      if (networks.length >= G.maxActive) return;
+      const o = new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1);
+      if (o.lengthSq() < 1e-4) o.set(0, 1, 0);
+      o.normalize().multiplyScalar(R);
+      const net = { heat: pickHeat(), pts: [], parent: [], hash: new Map(), tips: [] };
+      const oi = addPoint(net, o, 0);
+      net.parent[oi] = oi;
+      // seed a fan of tips in tangent directions around the origin
+      _N.copy(o).normalize();
+      _up.set(0, 1, 0); if (Math.abs(_N.y) > 0.9) _up.set(1, 0, 0);
+      const tA = new THREE.Vector3().crossVectors(_N, _up).normalize();
+      const tB = new THREE.Vector3().crossVectors(_N, tA).normalize();
+      for (let k = 0; k < G.seedTips; k++) {
+        const a = (Math.PI * 2 * k) / G.seedTips + (Math.random() - 0.5) * G.seedSpread;
+        const d = tA.clone().multiplyScalar(Math.cos(a)).addScaledVector(tB, Math.sin(a));
+        net.tips.push({ i: oi, dir: d, gen: 0 });
+      }
+      networks.push(net);
+      maybeLabelAt(o);
+    }
+
+    // Grow one tip: try left-bend / right-bend / straight, each gated by a draw.
+    function growTip(net, tip, newEndpoints) {
+      const pi = tip.i;
+      const pt1 = net.pts[pi];
+      _N.copy(pt1).normalize();
+      // project current dir into the surface tangent plane
+      const dirTan = tip.dir.clone().addScaledVector(_N, -tip.dir.dot(_N));
+      if (dirTan.lengthSq() < 1e-6) dirTan.crossVectors(_N, _up).normalize(); else dirTan.normalize();
+
+      const exA = pi, exB = net.parent[pi], exC = net.parent[exB];
+      const rL = Math.random(), rR = Math.random(), rS = Math.random();
+
+      if (rL < G.probBend) {
+        const dL = dirTan.clone().applyAxisAngle(_N, bendAngle);
+        growBranch(net, pi, pt1, dirTan, dL, bendAngle, tip.gen, exA, exB, exC, newEndpoints);
+      }
+      if (rR < G.probBend) {
+        const dR = dirTan.clone().applyAxisAngle(_N, -bendAngle);
+        growBranch(net, pi, pt1, dirTan, dR, bendAngle, tip.gen, exA, exB, exC, newEndpoints);
+      }
+      if (rS < G.probStraight) {
+        growBranch(net, pi, pt1, dirTan, dirTan.clone(), 0, tip.gen, exA, exB, exC, newEndpoints);
       }
     }
 
-    function totalAgents() { let s = 0; for (const n of networks) s += n.agents.length; return s; }
+    // Attempt a single branch; returns nothing but may add a tip/segment/bridge.
+    function growBranch(net, pi, pt1, dirTan, branchDir, maxAngle, gen, exA, exB, exC, newEndpoints) {
+      if (net.pts.length >= G.maxPts) return;
+      // 1. project intended target onto the surface (sphere: normalize * R)
+      _target.copy(pt1).addScaledVector(branchDir, G.segLength);
+      _pt2.copy(_target).normalize().multiplyScalar(R);
+      // 2. BOUNDARY GATE — inert on a closed sphere (closest_point is always valid)
+      // 3. ANGLE GATE on the realized segment (projected into the tangent plane)
+      _seg.subVectors(_pt2, pt1);
+      _seg.addScaledVector(_N, -_seg.dot(_N));
+      if (_seg.lengthSq() > 1e-8) {
+        const realized = Math.acos(THREE.MathUtils.clamp(_seg.normalize().dot(dirTan), -1, 1));
+        if (realized > maxAngle + angleSlack) return;
+      }
+      // 4. RECONNECTION-AWARE neighbour check
+      const nb = nearestPoint(net, _pt2, exA, exB, exC);
+      if (nb !== -1) {
+        if (Math.random() < G.reconnectAmt) {
+          const p2 = _pt2.clone();
+          addPoint(net, p2, pi);
+          addSegment(pt1, p2, MX.coral, 1);          // bridge flashes coral (the signal)
+          addSegment(p2, net.pts[nb], MX.coral, 1);
+        }
+        return; // reconnected or rejected — no new tip
+      }
+      // 5. SAME-FRAME SIBLING OVERLAP guard
+      for (const e of newEndpoints) if (e.distanceTo(_pt2) < clearance) return;
+      // 6. CREATE new tip + segment
+      const p2 = _pt2.clone();
+      const npi = addPoint(net, p2, pi);
+      addSegment(pt1, p2, net.heat, 1);
+      newEndpoints.push(p2);
+      if (gen + 1 < G.maxGen && net.tips.length < G.maxTips) {
+        const dirNew = p2.clone().sub(pt1);
+        if (dirNew.lengthSq() < 1e-8) dirNew.copy(branchDir);
+        net.tips.push({ i: npi, dir: dirNew.normalize(), gen: gen + 1 });
+      }
+      if (Math.random() < G.labelProb) maybeLabelAt(p2);
+    }
+
+    // One breadth-first growth tick across all networks.
+    function growStep() {
+      for (let ni = networks.length - 1; ni >= 0; ni--) {
+        const net = networks[ni];
+        if (net.tips.length === 0) { networks.splice(ni, 1); continue; } // saturated → retire
+        const current = net.tips;
+        net.tips = [];
+        const newEndpoints = [];
+        for (const tip of current) growTip(net, tip, newEndpoints);
+      }
+    }
+
+    function totalTips() { let s = 0; for (const n of networks) s += n.tips.length; return s; }
 
     /* ============================================================
        Data labels — projected DOM, machine-terse file-handle voice
@@ -473,15 +570,15 @@
       () => `pts.<b>${String(Math.floor(Math.random() * 99)).padStart(2, "0")}</b>`,
       () => `<b>${(Math.random() * 9.999).toFixed(3)}</b><small>ms</small>`,
     ];
-    function maybeLabel(nodeIdx) {
+    // Spawn a data label anchored to a local-space position on the sphere.
+    function maybeLabelAt(posVec) {
       if (activeLabels.length >= CONFIG.labels.max) return;
-      if (Math.random() > 0.6) return;
       const el = getLabelEl();
       const fmt = labelFormats[(Math.random() * labelFormats.length) | 0];
       el.innerHTML = `<span class="tick"></span>${fmt()}`;
       el.style.opacity = "0";
       const [lo, hi] = CONFIG.labels.life;
-      activeLabels.push({ el, node: nodeIdx, age: 0, life: lo + Math.random() * (hi - lo) });
+      activeLabels.push({ el, pos: posVec.clone(), age: 0, life: lo + Math.random() * (hi - lo) });
     }
 
     /* ============================================================
@@ -520,7 +617,7 @@
     /* ============================================================
        Main loop
        ============================================================ */
-    let lastSpawn = 0, nextSpawnIn = 0.4;
+    let lastSpawn = 0, nextSpawnIn = 0.4, growAccum = 0;
     const clock = new THREE.Clock();
     const r = {
       nodes:   document.getElementById("r-nodes"),
@@ -540,22 +637,28 @@
       const dt = Math.min(clock.getDelta(), 0.05);
       const t = clock.elapsedTime;
 
-      // spawn new origins on a randomized cadence
+      // spawn new growth origins on a randomized cadence
       lastSpawn += dt;
       if (lastSpawn >= nextSpawnIn) {
-        spawnNetwork();
+        spawnGrowth();
         lastSpawn = 0;
-        const [s0, s1] = CONFIG.net.spawnEvery;
+        const [s0, s1] = CONFIG.growth.spawnEvery;
         nextSpawnIn = s0 + Math.random() * (s1 - s0);
       }
 
-      // decay (the fade)
+      // breadth-first growth ticks (fixed cadence → slow, mechanical wavefront)
+      growAccum += dt;
+      let ticks = 0;
+      while (growAccum >= G.stepEvery && ticks < 3) { growStep(); growAccum -= G.stepEvery; ticks++; }
+
+      // decay the wireframe hover-glow
       const decay = Math.pow(CONFIG.energy.decayPerSec, dt);
       for (let e = 0; e < edgeCount; e++) edgeEnergy[e] *= decay;
       for (let n = 0; n < nodeCount; n++) nodeEnergy[n] *= decay;
 
-      // grow the agent networks
-      advanceNetworks(dt);
+      // decay the growth-trail energies
+      const gdecay = Math.pow(G.decayPerSec, dt);
+      for (let s = 0; s < segMax; s++) segEnergy[s] *= gdecay;
 
       // hover illumination — coral signal into the zone under the cursor
       updateHover();
@@ -575,6 +678,16 @@
         for (let n = 0; n < nodeCount; n++) {
           const d2 = nodes[n].distanceToSquared(hoverLocal);
           if (d2 < r2) nodeEnergy[n] = Math.min(1, nodeEnergy[n] + (1 - d2 / r2) * dt * 6);
+        }
+        // re-illuminate growth segments whose midpoint falls in the hovered zone
+        for (let s = 0; s < segMax; s++) {
+          const o6 = s * 6;
+          const mx = (growPos[o6] + growPos[o6 + 3]) * 0.5;
+          const my = (growPos[o6 + 1] + growPos[o6 + 4]) * 0.5;
+          const mz = (growPos[o6 + 2] + growPos[o6 + 5]) * 0.5;
+          const dx = mx - hoverLocal.x, dy = my - hoverLocal.y, dz = mz - hoverLocal.z;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < r2) segEnergy[s] = Math.min(1, segEnergy[s] + (1 - d2 / r2) * dt * 4);
         }
       }
 
@@ -599,6 +712,19 @@
       }
       ncols.needsUpdate = true;
 
+      // write growth-segment colors (heat * energy; additive → faded = invisible)
+      if (segMax > 0) {
+        const gcols = growGeo.getAttribute("color");
+        for (let s = 0; s < segMax; s++) {
+          const en = segEnergy[s], o6 = s * 6, o3 = s * 3;
+          const rr = segHeat[o3] * en, gg = segHeat[o3 + 1] * en, bb = segHeat[o3 + 2] * en;
+          gcols.array[o6] = rr;     gcols.array[o6 + 1] = gg;     gcols.array[o6 + 2] = bb;
+          gcols.array[o6 + 3] = rr; gcols.array[o6 + 4] = gg;     gcols.array[o6 + 5] = bb;
+        }
+        gcols.needsUpdate = true;
+        if (posDirty) { growGeo.getAttribute("position").needsUpdate = true; growGeo.setDrawRange(0, segMax * 2); posDirty = false; }
+      }
+
       // rotation: mechanical drift + soft steer toward cursor (no overshoot)
       targetRot.y += CONFIG.rotation.idleSpeed * dt;
       targetRot.y += steerInput.x * CONFIG.rotation.steer * dt;
@@ -617,7 +743,7 @@
         L.age += dt;
         const lifeT = L.age / L.life;
         if (lifeT >= 1) { L.el.style.opacity = "0"; labelPool.push(L.el); activeLabels.splice(i, 1); continue; }
-        _v.copy(nodes[L.node]);
+        _v.copy(L.pos);
         sculpture.localToWorld(_v);
         const facing = _v.clone().sub(camera.position).normalize();
         const normal = _v.clone().sub(sculpture.position).normalize();
@@ -631,7 +757,7 @@
       }
 
       r.origins.textContent = String(networks.length).padStart(2, "0");
-      r.paths.textContent = String(totalAgents()).padStart(2, "0");
+      r.paths.textContent = String(totalTips()).padStart(2, "0");
       dotsT += dt;
       if (dotsT > 0.4) { dotsT = 0; r.dots.textContent = ".".repeat((r.dots.textContent.length % 3) + 1); }
 
