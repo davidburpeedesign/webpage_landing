@@ -145,7 +145,7 @@
   </div>
 
   <div id="readout">
-    nodes <b id="r-nodes">—</b> &nbsp;·&nbsp; edges <b id="r-edges">—</b> &nbsp;·&nbsp; <span class="status">traversing<span id="r-dots">...</span></span> <b id="r-paths">—</b>
+    nodes <b id="r-nodes">—</b> &nbsp;·&nbsp; edges <b id="r-edges">—</b> &nbsp;·&nbsp; origins <b id="r-origins">—</b> &nbsp;·&nbsp; <span class="status">growing<span id="r-dots">...</span></span> <b id="r-paths">—</b>
   </div>
 
   <script type="importmap">
@@ -179,13 +179,15 @@
     };
 
     const CONFIG = {
-      sphere: { radius: 2.4, detail: 4 },          // denser mesh: 2562 nodes / ~7680 edges
+      // Geodesic frequency: each of the 20 base faces splits into freq*freq triangles.
+      // freq 23 ≈ 9.2k triangles / 5292 nodes / 15870 edges (~2x the previous mesh).
+      sphere: { radius: 2.4, frequency: 23 },
       color: {
-        edgeRest: MX.bone.clone().multiplyScalar(0.07), // resting hairline, fuses to void
-        nodeRest: MX.bone.clone().multiplyScalar(0.06),
+        edgeRest: MX.bone.clone().multiplyScalar(0.06), // resting hairline, fuses to void
+        nodeRest: MX.bone.clone().multiplyScalar(0.05),
         nodeHot:  MX.white,
         hover:    MX.coral,                          // illumination = active/focus signal
-        // path "heat" — cool-dominant, occasional warm coral/amber heat spots
+        // network "heat" — cool-dominant, occasional warm coral/amber heat spots
         heats: [
           { c: MX.white,  w: 0.30 },
           { c: MX.blue,   w: 0.28 },
@@ -194,12 +196,19 @@
           { c: MX.amber,  w: 0.10 },
         ],
       },
-      paths: {
-        maxActive: REDUCE ? 3 : 6,
-        spawnEvery: REDUCE ? [1.6, 3.4] : [0.5, 1.8],
-        speed: 9, minLen: 7, maxLen: 22,
+      // Emergent multi-agent growth: few origins, each seeding walker agents
+      // that crawl the wireframe, claim nodes, and branch into sprawling networks.
+      net: {
+        maxActive:  REDUCE ? 2 : 4,    // concurrent origins/networks
+        spawnEvery: REDUCE ? [2.0, 4.0] : [0.9, 2.4],
+        speed:      7,                 // edges traversed per second per agent
+        seedAgents: 3,                 // initial walkers fired from an origin
+        branchProb: 0.46,              // chance to spawn a child at each junction
+        maxAgents:  REDUCE ? 18 : 40,  // cap on simultaneous walkers per network
+        maxGen:     90,                // growth depth before an agent retires
+        forwardBias: 0.7,              // 0=random turns, 1=keep heading outward
       },
-      energy: { decayPerSec: 0.18, headBoost: 1.0 },
+      energy: { decayPerSec: 0.24 },
       hover:  { radius: 0.92, strength: 0.9 },
       rotation: {
         steer: 0.55, ease: 0.045,
@@ -235,10 +244,51 @@
     scene.add(sculpture);
 
     /* ============================================================
-       Icosphere graph (nodes + unique edges + adjacency)
+       Geodesic icosphere — Class-I subdivision at arbitrary frequency.
+       Each of the icosahedron's 20 faces is split into freq*freq
+       triangles and projected to the sphere, giving fine control over
+       density (unlike `detail`, which only steps in powers of four).
        ============================================================ */
-    let baseGeo = new THREE.IcosahedronGeometry(CONFIG.sphere.radius, CONFIG.sphere.detail);
-    baseGeo = mergeVertices(baseGeo);
+    function buildGeodesicIcosphere(radius, freq) {
+      const ico = new THREE.IcosahedronGeometry(radius, 0); // 20 base faces, non-indexed
+      const src = ico.getAttribute("position");
+      const faceCount = src.count / 3;
+      const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+      const ab = new THREE.Vector3(), ac = new THREE.Vector3();
+      const out = [];
+      const push = (v) => out.push(v.x, v.y, v.z);
+      for (let f = 0; f < faceCount; f++) {
+        A.fromBufferAttribute(src, f * 3);
+        B.fromBufferAttribute(src, f * 3 + 1);
+        C.fromBufferAttribute(src, f * 3 + 2);
+        ab.subVectors(B, A).multiplyScalar(1 / freq);
+        ac.subVectors(C, A).multiplyScalar(1 / freq);
+        // barycentric grid of points P(i,j) = A + i*ab + j*ac, projected to the sphere
+        const grid = [];
+        for (let i = 0; i <= freq; i++) {
+          grid[i] = [];
+          for (let j = 0; j <= freq - i; j++) {
+            const p = A.clone().addScaledVector(ab, i).addScaledVector(ac, j);
+            p.normalize().multiplyScalar(radius);
+            grid[i][j] = p;
+          }
+        }
+        for (let i = 0; i < freq; i++) {
+          for (let j = 0; j < freq - i; j++) {            // "up" triangles
+            push(grid[i][j]); push(grid[i + 1][j]); push(grid[i][j + 1]);
+          }
+          for (let j = 0; j < freq - i - 1; j++) {        // "down" triangles
+            push(grid[i + 1][j]); push(grid[i + 1][j + 1]); push(grid[i][j + 1]);
+          }
+        }
+      }
+      ico.dispose();
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(out, 3));
+      return mergeVertices(g); // dedupe shared edge/corner vertices -> clean topology
+    }
+
+    let baseGeo = buildGeodesicIcosphere(CONFIG.sphere.radius, CONFIG.sphere.frequency);
     baseGeo.computeVertexNormals();
 
     const posAttr = baseGeo.getAttribute("position");
@@ -308,58 +358,97 @@
 
     function setEdgeHot(ei, c) { const o = ei * 3; edgeHot[o] = c.r; edgeHot[o + 1] = c.g; edgeHot[o + 2] = c.b; }
 
-    /* ============================================================
-       A* pathfinding across the wireframe
-       ============================================================ */
-    function aStar(start, goal) {
-      const open = new Set([start]);
-      const cameFrom = new Map();
-      const g = new Float32Array(nodeCount).fill(Infinity);
-      const f = new Float32Array(nodeCount).fill(Infinity);
-      g[start] = 0; f[start] = nodes[start].distanceTo(nodes[goal]);
-      while (open.size) {
-        let current = -1, best = Infinity;
-        for (const n of open) if (f[n] < best) { best = f[n]; current = n; }
-        if (current === goal) {
-          const path = [current];
-          while (cameFrom.has(current)) { current = cameFrom.get(current); path.unshift(current); }
-          return path;
-        }
-        open.delete(current);
-        for (const nb of adjacency[current]) {
-          const tentative = g[current] + nodes[current].distanceTo(nodes[nb]);
-          if (tentative < g[nb]) {
-            cameFrom.set(nb, current);
-            g[nb] = tentative;
-            f[nb] = tentative + nodes[nb].distanceTo(nodes[goal]);
-            open.add(nb);
-          }
-        }
-      }
-      return null;
+    // Deposit energy on the edge a→b (must be adjacent), tinting it with a heat color.
+    function lightEdge(a, b, heat, intensity) {
+      const ei = edgeMap.get(edgeKey(a, b));
+      if (ei === undefined) return;
+      if (intensity > edgeEnergy[ei]) { edgeEnergy[ei] = intensity; setEdgeHot(ei, heat); }
+      if (0.75 > nodeEnergy[a]) nodeEnergy[a] = 0.75;
+      const ne = intensity * 0.9;
+      if (ne > nodeEnergy[b]) nodeEnergy[b] = ne;
     }
 
     /* ============================================================
-       Active paths (the slow lightning)
+       Emergent multi-agent growth.
+       A "network" begins at one origin and fires several walker agents.
+       Each agent crawls edge-to-edge; at every node it claims unvisited
+       neighbours, continues toward the one that best keeps its heading
+       (forwardBias), and may spawn child agents down the other branches.
+       Result: a few origins sprawling into complex dendritic networks.
        ============================================================ */
-    const activePaths = [];
-    function spawnPath() {
-      if (activePaths.length >= CONFIG.paths.maxActive) return;
-      const start = (Math.random() * nodeCount) | 0;
-      let goal = start;
-      for (let tries = 0; tries < 8; tries++) {
-        const candidate = (Math.random() * nodeCount) | 0;
-        if (nodes[candidate].distanceTo(nodes[start]) > CONFIG.sphere.radius * 0.8) { goal = candidate; break; }
+    const networks = [];
+    const _dir = new THREE.Vector3(), _cand = new THREE.Vector3();
+
+    function makeAgent(cur, target, gen) { return { cur, target, t: 0, gen, dead: false }; }
+
+    function spawnNetwork() {
+      if (networks.length >= CONFIG.net.maxActive) return;
+      const origin = (Math.random() * nodeCount) | 0;
+      const net = { origin, heat: pickHeat(), visited: new Set([origin]), agents: [] };
+      // fire seed walkers down distinct edges out of the origin
+      const nbrs = adjacency[origin].slice();
+      for (let i = nbrs.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [nbrs[i], nbrs[j]] = [nbrs[j], nbrs[i]]; }
+      const seeds = Math.min(CONFIG.net.seedAgents, nbrs.length);
+      for (let i = 0; i < seeds; i++) {
+        net.visited.add(nbrs[i]);                 // reserve target so seeds diverge
+        net.agents.push(makeAgent(origin, nbrs[i], 0));
       }
-      if (goal === start) return;
-      const path = aStar(start, goal);
-      if (!path || path.length < 3) return;
-      activePaths.push({
-        path: path.slice(0, Math.min(path.length, CONFIG.paths.maxLen)),
-        head: 0, lastNodeFired: -1, heat: pickHeat(),
-      });
-      maybeLabel(path[0]);
+      if (net.agents.length === 0) return;
+      networks.push(net);
+      maybeLabel(origin);
     }
+
+    // Pick the unvisited neighbour of `node` that best continues travel from `prev`.
+    function chooseForward(node, prev, candidates) {
+      _dir.subVectors(nodes[node], nodes[prev]).normalize();
+      let best = candidates[0], bestScore = -Infinity;
+      for (const c of candidates) {
+        _cand.subVectors(nodes[c], nodes[node]).normalize();
+        const score = _dir.dot(_cand) * CONFIG.net.forwardBias + Math.random() * (1 - CONFIG.net.forwardBias);
+        if (score > bestScore) { bestScore = score; best = c; }
+      }
+      return best;
+    }
+
+    function advanceNetworks(dt) {
+      for (let ni = networks.length - 1; ni >= 0; ni--) {
+        const net = networks[ni];
+        const agents = net.agents;
+        for (let ai = agents.length - 1; ai >= 0; ai--) {
+          const ag = agents[ai];
+          ag.t += CONFIG.net.speed * dt;
+          // glow grows along the edge the head is currently crossing
+          lightEdge(ag.cur, ag.target, net.heat, Math.min(1, ag.t + 0.25));
+          while (ag.t >= 1 && !ag.dead) {
+            ag.t -= 1;
+            lightEdge(ag.cur, ag.target, net.heat, 1);   // edge fully traversed
+            const arrived = ag.target, prev = ag.cur;
+            ag.cur = arrived;
+            if (Math.random() < 0.18) maybeLabel(arrived);
+            // unvisited neighbours become this network's frontier
+            const cands = [];
+            for (const n of adjacency[arrived]) if (!net.visited.has(n)) cands.push(n);
+            if (cands.length === 0 || ag.gen >= CONFIG.net.maxGen) { ag.dead = true; break; }
+            const primary = chooseForward(arrived, prev, cands);
+            net.visited.add(primary);
+            ag.target = primary; ag.gen++;
+            // branch into the remaining frontier edges
+            for (const c of cands) {
+              if (c === primary || agents.length >= CONFIG.net.maxAgents) continue;
+              if (Math.random() < CONFIG.net.branchProb) {
+                net.visited.add(c);
+                agents.push(makeAgent(arrived, c, ag.gen));
+              }
+            }
+          }
+        }
+        // prune dead agents; retire the network once nothing is growing
+        net.agents = agents.filter((a) => !a.dead);
+        if (net.agents.length === 0) networks.splice(ni, 1);
+      }
+    }
+
+    function totalAgents() { let s = 0; for (const n of networks) s += n.agents.length; return s; }
 
     /* ============================================================
        Data labels — projected DOM, machine-terse file-handle voice
@@ -434,10 +523,11 @@
     let lastSpawn = 0, nextSpawnIn = 0.4;
     const clock = new THREE.Clock();
     const r = {
-      nodes: document.getElementById("r-nodes"),
-      edges: document.getElementById("r-edges"),
-      paths: document.getElementById("r-paths"),
-      dots:  document.getElementById("r-dots"),
+      nodes:   document.getElementById("r-nodes"),
+      edges:   document.getElementById("r-edges"),
+      origins: document.getElementById("r-origins"),
+      paths:   document.getElementById("r-paths"),
+      dots:    document.getElementById("r-dots"),
     };
     r.nodes.textContent = nodeCount;
     r.edges.textContent = edgeCount;
@@ -450,12 +540,12 @@
       const dt = Math.min(clock.getDelta(), 0.05);
       const t = clock.elapsedTime;
 
-      // spawn cadence
+      // spawn new origins on a randomized cadence
       lastSpawn += dt;
       if (lastSpawn >= nextSpawnIn) {
-        spawnPath();
+        spawnNetwork();
         lastSpawn = 0;
-        const [s0, s1] = CONFIG.paths.spawnEvery;
+        const [s0, s1] = CONFIG.net.spawnEvery;
         nextSpawnIn = s0 + Math.random() * (s1 - s0);
       }
 
@@ -464,27 +554,8 @@
       for (let e = 0; e < edgeCount; e++) edgeEnergy[e] *= decay;
       for (let n = 0; n < nodeCount; n++) nodeEnergy[n] *= decay;
 
-      // advance lightning heads
-      for (let i = activePaths.length - 1; i >= 0; i--) {
-        const p = activePaths[i];
-        p.head += CONFIG.paths.speed * dt;
-        const seg = Math.floor(p.head);
-        for (let s = Math.max(0, seg - 1); s <= seg && s < p.path.length - 1; s++) {
-          const a = p.path[s], b = p.path[s + 1];
-          const ei = edgeMap.get(edgeKey(a, b));
-          if (ei !== undefined) {
-            edgeEnergy[ei] = Math.min(1, edgeEnergy[ei] + CONFIG.energy.headBoost);
-            setEdgeHot(ei, p.heat);
-          }
-          nodeEnergy[a] = Math.min(1, nodeEnergy[a] + 0.8);
-          nodeEnergy[b] = Math.min(1, nodeEnergy[b] + 0.8);
-        }
-        if (seg !== p.lastNodeFired && seg < p.path.length) {
-          p.lastNodeFired = seg;
-          maybeLabel(p.path[Math.min(seg, p.path.length - 1)]);
-        }
-        if (p.head >= p.path.length - 1) activePaths.splice(i, 1);
-      }
+      // grow the agent networks
+      advanceNetworks(dt);
 
       // hover illumination — coral signal into the zone under the cursor
       updateHover();
@@ -559,7 +630,8 @@
         L.el.style.opacity = front ? String(fade) : "0";
       }
 
-      r.paths.textContent = String(activePaths.length).padStart(2, "0");
+      r.origins.textContent = String(networks.length).padStart(2, "0");
+      r.paths.textContent = String(totalAgents()).padStart(2, "0");
       dotsT += dt;
       if (dotsT > 0.4) { dotsT = 0; r.dots.textContent = ".".repeat((r.dots.textContent.length % 3) + 1); }
 
