@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Data Sculpture — Prototype</title>
+  <style>
+    :root {
+      /* ---- Design tokens (placeholder — swap for your design system) ---- */
+      --bg-0: #05070d;
+      --bg-1: #0a0e17;
+      --ink: #cfe9ff;
+      --ink-dim: #5b7184;
+      --accent: #38e1ff;
+      --font: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: radial-gradient(ellipse at 50% 40%, var(--bg-1) 0%, var(--bg-0) 70%);
+      color: var(--ink);
+      font-family: var(--font);
+      cursor: crosshair;
+    }
+
+    #stage { position: fixed; inset: 0; }
+    canvas { display: block; }
+
+    /* ---- Floating data labels (projected from 3D) ---- */
+    #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+    .data-label {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+      color: var(--accent);
+      text-shadow: 0 0 8px rgba(56, 225, 255, 0.55);
+      will-change: transform, opacity;
+    }
+    .data-label .tick {
+      display: inline-block;
+      width: 5px; height: 5px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      vertical-align: middle;
+    }
+    .data-label small { color: var(--ink-dim); }
+
+    /* ---- HUD chrome (restyle later) ---- */
+    #hud {
+      position: fixed;
+      left: 28px;
+      top: 26px;
+      pointer-events: none;
+      user-select: none;
+    }
+    #hud h1 {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.34em;
+      text-transform: uppercase;
+      color: var(--ink);
+    }
+    #hud p {
+      margin-top: 8px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: var(--ink-dim);
+      max-width: 320px;
+      line-height: 1.6;
+    }
+    #readout {
+      position: fixed;
+      left: 28px;
+      bottom: 24px;
+      font-size: 10.5px;
+      letter-spacing: 0.12em;
+      color: var(--ink-dim);
+      pointer-events: none;
+      user-select: none;
+    }
+    #readout b { color: var(--accent); font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="labels"></div>
+
+  <div id="hud">
+    <h1>Topology&nbsp;//&nbsp;Live</h1>
+    <p>Pathfinding traversals over a polygonal manifold. Hover to illuminate a region · move to steer rotation.</p>
+  </div>
+  <div id="readout">
+    NODES <b id="r-nodes">—</b> · EDGES <b id="r-edges">—</b> · ACTIVE PATHS <b id="r-paths">—</b>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+
+    /* ============================================================
+       CONFIG — tune everything here; later map to your design system
+       ============================================================ */
+    const CONFIG = {
+      sphere: {
+        radius: 2.4,
+        detail: 3,          // icosahedron subdivision (2=162 nodes, 3=642 nodes)
+      },
+      color: {
+        background: 0x05070d,
+        edgeBase:   new THREE.Color(0x1c3a52), // resting wireframe
+        edgeHot:    new THREE.Color(0x7df0ff), // fully energized edge
+        node:       new THREE.Color(0x2a5570),
+        nodeHot:    new THREE.Color(0xbdf6ff),
+        face:       new THREE.Color(0x0b1622), // faint filled facets
+      },
+      paths: {
+        maxActive: 6,        // simultaneous traversals
+        spawnEvery: [0.5, 1.8], // random seconds between spawns
+        speed: 9,            // nodes traversed per second
+        minLen: 7,           // min node count for a path
+        maxLen: 22,          // max node count (A* may return shorter)
+      },
+      energy: {
+        decayPerSec: 0.18,   // fraction of edge energy remaining after 1s
+        headBoost: 1.0,      // energy deposited at the lightning head
+      },
+      hover: {
+        radius: 0.92,        // illumination radius (world units) around cursor hit
+        strength: 0.85,      // energy injected per frame within radius
+      },
+      rotation: {
+        steer: 0.55,         // how strongly cursor pulls rotation
+        ease: 0.045,         // lerp toward target rotation
+        idleSpeed: 0.04,     // ambient spin (rad/s)
+      },
+      breathing: {
+        amp: 0.012,          // scale pulse amplitude
+        speed: 0.7,
+      },
+      labels: {
+        max: 14,
+        life: [2.2, 4.0],    // seconds a label lives
+      },
+    };
+
+    /* ============================================================
+       Scene scaffolding
+       ============================================================ */
+    const stage = document.getElementById("stage");
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    stage.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 8.2);
+
+    // The whole sculpture lives under one group so we can rotate it as a unit.
+    const sculpture = new THREE.Group();
+    scene.add(sculpture);
+
+    /* ============================================================
+       Build the icosphere graph (nodes + unique edges + adjacency)
+       ============================================================ */
+    let baseGeo = new THREE.IcosahedronGeometry(CONFIG.sphere.radius, CONFIG.sphere.detail);
+    baseGeo = mergeVertices(baseGeo); // collapse duplicate verts -> clean topology
+    baseGeo.computeVertexNormals();
+
+    const posAttr = baseGeo.getAttribute("position");
+    const nodeCount = posAttr.count;
+    const nodes = []; // THREE.Vector3 per node (local space)
+    for (let i = 0; i < nodeCount; i++) {
+      nodes.push(new THREE.Vector3().fromBufferAttribute(posAttr, i));
+    }
+
+    const index = baseGeo.getIndex();
+    const adjacency = Array.from({ length: nodeCount }, () => []);
+    const edgeKey = (a, b) => (a < b ? a * nodeCount + b : b * nodeCount + a);
+    const edgeMap = new Map(); // key -> edgeIndex
+    const edges = [];          // { a, b }
+
+    function addEdge(a, b) {
+      const key = edgeKey(a, b);
+      if (edgeMap.has(key)) return;
+      const ei = edges.length;
+      edgeMap.set(key, ei);
+      edges.push({ a, b });
+      adjacency[a].push(b);
+      adjacency[b].push(a);
+    }
+    for (let t = 0; t < index.count; t += 3) {
+      const a = index.getX(t), b = index.getX(t + 1), c = index.getX(t + 2);
+      addEdge(a, b); addEdge(b, c); addEdge(c, a);
+    }
+    const edgeCount = edges.length;
+
+    /* ============================================================
+       Wireframe rendering: one LineSegments with per-vertex color
+       (two line-verts per edge; energy drives color toward "hot")
+       ============================================================ */
+    const linePositions = new Float32Array(edgeCount * 2 * 3);
+    const lineColors = new Float32Array(edgeCount * 2 * 3);
+    for (let e = 0; e < edgeCount; e++) {
+      const { a, b } = edges[e];
+      const pa = nodes[a], pb = nodes[b];
+      linePositions.set([pa.x, pa.y, pa.z, pb.x, pb.y, pb.z], e * 6);
+    }
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
+    lineGeo.setAttribute("color", new THREE.BufferAttribute(lineColors, 3));
+    const lineMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const wireframe = new THREE.LineSegments(lineGeo, lineMat);
+    sculpture.add(wireframe);
+
+    // Faint filled facets so the sphere reads as a solid manifold + catches the ray.
+    const faceMat = new THREE.MeshBasicMaterial({
+      color: CONFIG.color.face,
+      transparent: true,
+      opacity: 0.55,
+      side: THREE.FrontSide,
+      depthWrite: true,
+    });
+    const faceMesh = new THREE.Mesh(baseGeo, faceMat);
+    sculpture.add(faceMesh);
+
+    // Glowing node points (per-vertex color, energized by nearby activity).
+    const nodePositions = new Float32Array(nodeCount * 3);
+    const nodeColors = new Float32Array(nodeCount * 3);
+    for (let i = 0; i < nodeCount; i++) {
+      nodePositions.set([nodes[i].x, nodes[i].y, nodes[i].z], i * 3);
+    }
+    const nodeGeo = new THREE.BufferGeometry();
+    nodeGeo.setAttribute("position", new THREE.BufferAttribute(nodePositions, 3));
+    nodeGeo.setAttribute("color", new THREE.BufferAttribute(nodeColors, 3));
+    const nodeMat = new THREE.PointsMaterial({
+      size: 0.05,
+      vertexColors: true,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    const nodePoints = new THREE.Points(nodeGeo, nodeMat);
+    sculpture.add(nodePoints);
+
+    /* ============================================================
+       Energy fields (decay each frame -> creates fading trails)
+       ============================================================ */
+    const edgeEnergy = new Float32Array(edgeCount);
+    const nodeEnergy = new Float32Array(nodeCount);
+
+    /* ============================================================
+       A* pathfinding across the wireframe graph
+       ============================================================ */
+    function aStar(start, goal) {
+      const open = new Set([start]);
+      const cameFrom = new Map();
+      const g = new Float32Array(nodeCount).fill(Infinity);
+      const f = new Float32Array(nodeCount).fill(Infinity);
+      g[start] = 0;
+      f[start] = nodes[start].distanceTo(nodes[goal]);
+
+      while (open.size) {
+        // node in open with lowest f
+        let current = -1, best = Infinity;
+        for (const n of open) if (f[n] < best) { best = f[n]; current = n; }
+        if (current === goal) {
+          const path = [current];
+          while (cameFrom.has(current)) { current = cameFrom.get(current); path.unshift(current); }
+          return path;
+        }
+        open.delete(current);
+        for (const nb of adjacency[current]) {
+          const tentative = g[current] + nodes[current].distanceTo(nodes[nb]);
+          if (tentative < g[nb]) {
+            cameFrom.set(nb, current);
+            g[nb] = tentative;
+            f[nb] = tentative + nodes[nb].distanceTo(nodes[goal]);
+            open.add(nb);
+          }
+        }
+      }
+      return null;
+    }
+
+    /* ============================================================
+       Active paths (the "slow lightning")
+       ============================================================ */
+    const activePaths = [];
+
+    function spawnPath() {
+      if (activePaths.length >= CONFIG.paths.maxActive) return;
+      const start = (Math.random() * nodeCount) | 0;
+      let goal = start;
+      // pick a goal a reasonable graph-distance away
+      for (let tries = 0; tries < 8; tries++) {
+        const candidate = (Math.random() * nodeCount) | 0;
+        if (nodes[candidate].distanceTo(nodes[start]) > CONFIG.sphere.radius * 0.8) { goal = candidate; break; }
+      }
+      if (goal === start) return;
+      const path = aStar(start, goal);
+      if (!path || path.length < 3) return;
+      // clamp very long paths
+      const len = Math.min(path.length, CONFIG.paths.maxLen);
+      activePaths.push({
+        path: path.slice(0, len),
+        head: 0,          // float index along path
+        lastNodeFired: -1,
+      });
+      maybeLabel(path[0]);
+    }
+
+    /* ============================================================
+       Data labels — projected DOM elements
+       ============================================================ */
+    const labelLayer = document.getElementById("labels");
+    const labelPool = [];
+    const activeLabels = [];
+
+    function getLabelEl() {
+      if (labelPool.length) return labelPool.pop();
+      const el = document.createElement("div");
+      el.className = "data-label";
+      labelLayer.appendChild(el);
+      return el;
+    }
+
+    const labelFormats = [
+      () => `0x${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0").toUpperCase()}`,
+      () => `${(Math.random() * 100).toFixed(1)}<small>%</small>`,
+      () => `${(Math.random() * 9.999).toFixed(3)}<small>ms</small>`,
+      () => `Δ${(Math.random() * 2 - 1).toFixed(2)}`,
+      () => `${(40 + Math.random() * 20).toFixed(4)}°`,
+      () => `${Math.floor(Math.random() * 9000 + 1000)}<small>·node</small>`,
+    ];
+
+    function maybeLabel(nodeIdx) {
+      if (activeLabels.length >= CONFIG.labels.max) return;
+      if (Math.random() > 0.6) return;
+      const el = getLabelEl();
+      const fmt = labelFormats[(Math.random() * labelFormats.length) | 0];
+      el.innerHTML = `<span class="tick"></span>${fmt()}`;
+      el.style.opacity = "0";
+      const [lo, hi] = CONFIG.labels.life;
+      activeLabels.push({ el, node: nodeIdx, age: 0, life: lo + Math.random() * (hi - lo) });
+    }
+
+    /* ============================================================
+       Interaction: pointer -> raycast (hover) + rotation steering
+       ============================================================ */
+    const raycaster = new THREE.Raycaster();
+    const pointerNDC = new THREE.Vector2(0, 0);
+    let pointerInside = false;
+    const hoverLocal = new THREE.Vector3();
+    let hovering = false;
+
+    // rotation state
+    const targetRot = new THREE.Vector2(0, 0); // x=pitch, y=yaw
+    const steerInput = new THREE.Vector2(0, 0);
+
+    window.addEventListener("pointermove", (ev) => {
+      pointerNDC.x = (ev.clientX / window.innerWidth) * 2 - 1;
+      pointerNDC.y = -(ev.clientY / window.innerHeight) * 2 + 1;
+      pointerInside = true;
+      // steering: cursor offset from center pulls rotation toward it
+      steerInput.set(pointerNDC.x, pointerNDC.y);
+    });
+    window.addEventListener("pointerleave", () => { pointerInside = false; steerInput.set(0, 0); });
+
+    function updateHover() {
+      hovering = false;
+      if (!pointerInside) return;
+      raycaster.setFromCamera(pointerNDC, camera);
+      const hit = raycaster.intersectObject(faceMesh, false)[0];
+      if (!hit) return;
+      // convert world hit -> sculpture local space (sphere is rotating)
+      hoverLocal.copy(hit.point);
+      sculpture.worldToLocal(hoverLocal);
+      hovering = true;
+    }
+
+    /* ============================================================
+       Main loop
+       ============================================================ */
+    let lastSpawn = 0;
+    let nextSpawnIn = 0.4;
+    const clock = new THREE.Clock();
+
+    const r = {
+      nodes: document.getElementById("r-nodes"),
+      edges: document.getElementById("r-edges"),
+      paths: document.getElementById("r-paths"),
+    };
+    r.nodes.textContent = nodeCount;
+    r.edges.textContent = edgeCount;
+
+    const _v = new THREE.Vector3();
+
+    function animate() {
+      const dt = Math.min(clock.getDelta(), 0.05);
+      const t = clock.elapsedTime;
+
+      /* --- spawn paths on a randomized cadence --- */
+      lastSpawn += dt;
+      if (lastSpawn >= nextSpawnIn) {
+        spawnPath();
+        lastSpawn = 0;
+        const [s0, s1] = CONFIG.paths.spawnEvery;
+        nextSpawnIn = s0 + Math.random() * (s1 - s0);
+      }
+
+      /* --- decay energy fields (the fade) --- */
+      const decay = Math.pow(CONFIG.energy.decayPerSec, dt);
+      for (let e = 0; e < edgeCount; e++) edgeEnergy[e] *= decay;
+      for (let n = 0; n < nodeCount; n++) nodeEnergy[n] *= decay;
+
+      /* --- advance lightning heads, deposit energy on traversed edges --- */
+      for (let i = activePaths.length - 1; i >= 0; i--) {
+        const p = activePaths[i];
+        p.head += CONFIG.paths.speed * dt;
+        const seg = Math.floor(p.head);
+        // light the current edge + a couple behind for a glowing comet body
+        for (let s = Math.max(0, seg - 1); s <= seg && s < p.path.length - 1; s++) {
+          const a = p.path[s], b = p.path[s + 1];
+          const ei = edgeMap.get(edgeKey(a, b));
+          if (ei !== undefined) edgeEnergy[ei] = Math.min(1, edgeEnergy[ei] + CONFIG.energy.headBoost);
+          nodeEnergy[a] = Math.min(1, nodeEnergy[a] + 0.8);
+          nodeEnergy[b] = Math.min(1, nodeEnergy[b] + 0.8);
+        }
+        // fire occasional data labels as the head reaches new nodes
+        if (seg !== p.lastNodeFired && seg < p.path.length) {
+          p.lastNodeFired = seg;
+          maybeLabel(p.path[Math.min(seg, p.path.length - 1)]);
+        }
+        if (p.head >= p.path.length - 1) activePaths.splice(i, 1);
+      }
+
+      /* --- hover illumination: inject energy near the cursor hit --- */
+      updateHover();
+      if (hovering) {
+        const r2 = CONFIG.hover.radius * CONFIG.hover.radius;
+        for (let e = 0; e < edgeCount; e++) {
+          const { a, b } = edges[e];
+          _v.addVectors(nodes[a], nodes[b]).multiplyScalar(0.5);
+          const d2 = _v.distanceToSquared(hoverLocal);
+          if (d2 < r2) {
+            const falloff = 1 - d2 / r2;
+            edgeEnergy[e] = Math.min(1, edgeEnergy[e] + CONFIG.hover.strength * falloff * dt * 6);
+          }
+        }
+        for (let n = 0; n < nodeCount; n++) {
+          const d2 = nodes[n].distanceToSquared(hoverLocal);
+          if (d2 < r2) nodeEnergy[n] = Math.min(1, nodeEnergy[n] + (1 - d2 / r2) * dt * 6);
+        }
+      }
+
+      /* --- write energy -> colors --- */
+      const base = CONFIG.color.edgeBase, hot = CONFIG.color.edgeHot;
+      const cols = lineGeo.getAttribute("color");
+      for (let e = 0; e < edgeCount; e++) {
+        const en = edgeEnergy[e];
+        const rr = base.r + (hot.r - base.r) * en;
+        const gg = base.g + (hot.g - base.g) * en;
+        const bb = base.b + (hot.b - base.b) * en;
+        const o = e * 6;
+        cols.array[o] = rr;     cols.array[o + 1] = gg;     cols.array[o + 2] = bb;
+        cols.array[o + 3] = rr; cols.array[o + 4] = gg;     cols.array[o + 5] = bb;
+      }
+      cols.needsUpdate = true;
+
+      const nbase = CONFIG.color.node, nhot = CONFIG.color.nodeHot;
+      const ncols = nodeGeo.getAttribute("color");
+      for (let n = 0; n < nodeCount; n++) {
+        const en = nodeEnergy[n];
+        const o = n * 3;
+        ncols.array[o]     = nbase.r + (nhot.r - nbase.r) * en;
+        ncols.array[o + 1] = nbase.g + (nhot.g - nbase.g) * en;
+        ncols.array[o + 2] = nbase.b + (nhot.b - nbase.b) * en;
+      }
+      ncols.needsUpdate = true;
+
+      /* --- rotation: idle spin + soft steer toward cursor --- */
+      targetRot.y += CONFIG.rotation.idleSpeed * dt;            // ambient drift
+      targetRot.y += steerInput.x * CONFIG.rotation.steer * dt; // yaw toward cursor x
+      targetRot.x += -steerInput.y * CONFIG.rotation.steer * dt; // pitch toward cursor y
+      targetRot.x = Math.max(-0.9, Math.min(0.9, targetRot.x)); // clamp pitch
+      sculpture.rotation.y += (targetRot.y - sculpture.rotation.y) * (CONFIG.rotation.ease + 0.0);
+      sculpture.rotation.x += (targetRot.x - sculpture.rotation.x) * (CONFIG.rotation.ease + 0.0);
+
+      /* --- breathing --- */
+      const breathe = 1 + Math.sin(t * CONFIG.breathing.speed) * CONFIG.breathing.amp;
+      sculpture.scale.setScalar(breathe);
+
+      /* --- update projected labels --- */
+      for (let i = activeLabels.length - 1; i >= 0; i--) {
+        const L = activeLabels[i];
+        L.age += dt;
+        const lifeT = L.age / L.life;
+        if (lifeT >= 1) {
+          L.el.style.opacity = "0";
+          labelPool.push(L.el);
+          activeLabels.splice(i, 1);
+          continue;
+        }
+        _v.copy(nodes[L.node]);
+        sculpture.localToWorld(_v);
+        const facing = _v.clone().sub(camera.position).normalize();
+        const normal = _v.clone().sub(sculpture.position).normalize();
+        const front = facing.dot(normal) < 0; // node on the near hemisphere
+        _v.project(camera);
+        const x = (_v.x * 0.5 + 0.5) * window.innerWidth;
+        const y = (-_v.y * 0.5 + 0.5) * window.innerHeight;
+        L.el.style.transform = `translate(-50%, -50%) translate(${x}px, ${y - 14}px)`;
+        // fade in then out; hide if behind the sphere
+        const fade = Math.sin(Math.min(lifeT, 1) * Math.PI);
+        L.el.style.opacity = front ? String(fade) : "0";
+      }
+
+      r.paths.textContent = activePaths.length;
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    /* ============================================================
+       Resize
+       ============================================================ */
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
