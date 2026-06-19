@@ -183,10 +183,8 @@
       // freq 23 ≈ 9.2k triangles / 5292 nodes / 15870 edges (~2x the previous mesh).
       sphere: { radius: 2.4, frequency: 23 },
       color: {
-        edgeRest: MX.bone.clone().multiplyScalar(0.06), // resting hairline, fuses to void
-        nodeRest: MX.bone.clone().multiplyScalar(0.05),
-        nodeHot:  MX.white,
-        hover:    MX.coral,                          // illumination = active/focus signal
+        edgeRest: MX.bone.clone().multiplyScalar(0.016), // near-zero: just a hint of the topology
+        nodeRest: MX.bone.clone().multiplyScalar(0.012),
         // network "heat" — cool-dominant, occasional warm coral/amber heat spots
         heats: [
           { c: MX.white,  w: 0.30 },
@@ -208,7 +206,6 @@
         probBend:   0.5,               // per-side bend probability
         probStraight: 0.8,             // straight-continuation probability
         clearanceFactor: 0.6,          // clearance = factor * segLength (spacing/forks)
-        reconnectAmt: 0.2,             // chance a near-miss bridges the network instead
         angleSlackDeg: 14,             // tolerance on the realized segment angle
         edgeTol:    0.5,               // off-surface reject (inert on a closed sphere)
         maxGen:     70,                // branch depth before a tip retires
@@ -219,8 +216,6 @@
         decayPerSec: 0.4,              // growth-trail fade
         labelProb:  0.12,              // chance a new endpoint emits a data label
       },
-      energy: { decayPerSec: 0.24 },   // wireframe hover-glow fade
-      hover:  { radius: 0.92, strength: 0.9 },
       rotation: {
         steer: 0.55, ease: 0.045,
         idleSpeed: REDUCE ? 0 : 0.04,               // mechanical drift, no idle on reduced
@@ -308,16 +303,14 @@
     for (let i = 0; i < nodeCount; i++) nodes.push(new THREE.Vector3().fromBufferAttribute(posAttr, i));
 
     const index = baseGeo.getIndex();
-    const adjacency = Array.from({ length: nodeCount }, () => []);
     const edgeKey = (a, b) => (a < b ? a * nodeCount + b : b * nodeCount + a);
-    const edgeMap = new Map();
+    const edgeSeen = new Set();
     const edges = [];
     function addEdge(a, b) {
       const key = edgeKey(a, b);
-      if (edgeMap.has(key)) return;
-      edgeMap.set(key, edges.length);
+      if (edgeSeen.has(key)) return;
+      edgeSeen.add(key);
       edges.push({ a, b });
-      adjacency[a].push(b); adjacency[b].push(a);
     }
     for (let t = 0; t < index.count; t += 3) {
       const a = index.getX(t), b = index.getX(t + 1), c = index.getX(t + 2);
@@ -326,14 +319,17 @@
     const edgeCount = edges.length;
 
     /* ============================================================
-       Wireframe: LineSegments w/ per-vertex color (additive → floats on void)
+       Wireframe: faint static topology — barely-there hints of the sphere.
+       Nothing energizes it anymore, so its colour is set once at init.
        ============================================================ */
+    const eRest = CONFIG.color.edgeRest;
     const linePositions = new Float32Array(edgeCount * 2 * 3);
     const lineColors = new Float32Array(edgeCount * 2 * 3);
     for (let e = 0; e < edgeCount; e++) {
       const { a, b } = edges[e];
       const pa = nodes[a], pb = nodes[b];
       linePositions.set([pa.x, pa.y, pa.z, pb.x, pb.y, pb.z], e * 6);
+      lineColors.set([eRest.r, eRest.g, eRest.b, eRest.r, eRest.g, eRest.b], e * 6);
     }
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
@@ -345,29 +341,22 @@
     // No solid facets: additive lines with depthWrite:false render both hemispheres,
     // so the entire wireframe sphere is see-through.
 
-    // Node points — bone hairlights, energized toward white.
+    // Node points — faint static hairlights (set once).
+    const nRest = CONFIG.color.nodeRest;
     const nodePositions = new Float32Array(nodeCount * 3);
     const nodeColors = new Float32Array(nodeCount * 3);
-    for (let i = 0; i < nodeCount; i++) nodePositions.set([nodes[i].x, nodes[i].y, nodes[i].z], i * 3);
+    for (let i = 0; i < nodeCount; i++) {
+      nodePositions.set([nodes[i].x, nodes[i].y, nodes[i].z], i * 3);
+      nodeColors.set([nRest.r, nRest.g, nRest.b], i * 3);
+    }
     const nodeGeo = new THREE.BufferGeometry();
     nodeGeo.setAttribute("position", new THREE.BufferAttribute(nodePositions, 3));
     nodeGeo.setAttribute("color", new THREE.BufferAttribute(nodeColors, 3));
     const nodePoints = new THREE.Points(nodeGeo, new THREE.PointsMaterial({
-      size: 0.032, vertexColors: true, transparent: true,
+      size: 0.028, vertexColors: true, transparent: true,
       blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
     }));
     sculpture.add(nodePoints);
-
-    /* ============================================================
-       Energy fields (decay each frame → trails) + per-edge heat target
-       ============================================================ */
-    const edgeEnergy = new Float32Array(edgeCount);
-    const edgeHot = new Float32Array(edgeCount * 3); // current hot-target color per edge
-    const nodeEnergy = new Float32Array(nodeCount);
-    // seed hot targets to white so untouched-but-hovered edges still read coral once set
-    for (let e = 0; e < edgeCount; e++) edgeHot.set([MX.white.r, MX.white.g, MX.white.b], e * 3);
-
-    function setEdgeHot(ei, c) { const o = ei * 3; edgeHot[o] = c.r; edgeHot[o + 1] = c.g; edgeHot[o + 2] = c.b; }
 
     /* ============================================================
        Surface-constrained branching growth (free-form on the sphere).
@@ -507,17 +496,8 @@
         const realized = Math.acos(THREE.MathUtils.clamp(_seg.normalize().dot(dirTan), -1, 1));
         if (realized > maxAngle + angleSlack) return;
       }
-      // 4. RECONNECTION-AWARE neighbour check
-      const nb = nearestPoint(net, _pt2, exA, exB, exC);
-      if (nb !== -1) {
-        if (Math.random() < G.reconnectAmt) {
-          const p2 = _pt2.clone();
-          addPoint(net, p2, pi);
-          addSegment(pt1, p2, MX.coral, 1);          // bridge flashes coral (the signal)
-          addSegment(p2, net.pts[nb], MX.coral, 1);
-        }
-        return; // reconnected or rejected — no new tip
-      }
+      // 4. NEIGHBOUR CHECK — reject growth into already-claimed space (no reconnection)
+      if (nearestPoint(net, _pt2, exA, exB, exC) !== -1) return;
       // 5. SAME-FRAME SIBLING OVERLAP guard
       for (const e of newEndpoints) if (e.distanceTo(_pt2) < clearance) return;
       // 6. CREATE new tip + segment
@@ -582,37 +562,15 @@
     }
 
     /* ============================================================
-       Interaction: pointer raycast (hover) + rotation steering
+       Interaction: cursor steers the sphere's rotation
        ============================================================ */
-    const raycaster = new THREE.Raycaster();
-    const pointerNDC = new THREE.Vector2(0, 0);
-    let pointerInside = false;
-    const hoverLocal = new THREE.Vector3();
-    const hoverSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), CONFIG.sphere.radius);
-    const _hit = new THREE.Vector3();
-    let hovering = false;
     const targetRot = new THREE.Vector2(0, 0);
     const steerInput = new THREE.Vector2(0, 0);
 
     window.addEventListener("pointermove", (ev) => {
-      pointerNDC.x = (ev.clientX / window.innerWidth) * 2 - 1;
-      pointerNDC.y = -(ev.clientY / window.innerHeight) * 2 + 1;
-      pointerInside = true;
-      steerInput.set(pointerNDC.x, pointerNDC.y);
+      steerInput.set((ev.clientX / window.innerWidth) * 2 - 1, -(ev.clientY / window.innerHeight) * 2 + 1);
     });
-    window.addEventListener("pointerleave", () => { pointerInside = false; steerInput.set(0, 0); });
-
-    function updateHover() {
-      hovering = false;
-      if (!pointerInside) return;
-      raycaster.setFromCamera(pointerNDC, camera);
-      // Intersect the bounding sphere directly (it scales with the breathing sculpture).
-      hoverSphere.radius = CONFIG.sphere.radius * sculpture.scale.x;
-      if (!raycaster.ray.intersectSphere(hoverSphere, _hit)) return;
-      hoverLocal.copy(_hit);
-      sculpture.worldToLocal(hoverLocal);
-      hovering = true;
-    }
+    window.addEventListener("pointerleave", () => steerInput.set(0, 0));
 
     /* ============================================================
        Main loop
@@ -630,7 +588,6 @@
     r.edges.textContent = edgeCount;
 
     const _v = new THREE.Vector3();
-    const rest = CONFIG.color.edgeRest, nrest = CONFIG.color.nodeRest, nhot = CONFIG.color.nodeHot;
     let dotsT = 0;
 
     function animate() {
@@ -651,66 +608,9 @@
       let ticks = 0;
       while (growAccum >= G.stepEvery && ticks < 3) { growStep(); growAccum -= G.stepEvery; ticks++; }
 
-      // decay the wireframe hover-glow
-      const decay = Math.pow(CONFIG.energy.decayPerSec, dt);
-      for (let e = 0; e < edgeCount; e++) edgeEnergy[e] *= decay;
-      for (let n = 0; n < nodeCount; n++) nodeEnergy[n] *= decay;
-
-      // decay the growth-trail energies
+      // decay the growth-trail energies (the fade)
       const gdecay = Math.pow(G.decayPerSec, dt);
       for (let s = 0; s < segMax; s++) segEnergy[s] *= gdecay;
-
-      // hover illumination — coral signal into the zone under the cursor
-      updateHover();
-      if (hovering) {
-        const r2 = CONFIG.hover.radius * CONFIG.hover.radius;
-        for (let e = 0; e < edgeCount; e++) {
-          const { a, b } = edges[e];
-          _v.addVectors(nodes[a], nodes[b]).multiplyScalar(0.5);
-          const d2 = _v.distanceToSquared(hoverLocal);
-          if (d2 < r2) {
-            const falloff = 1 - d2 / r2;
-            const add = CONFIG.hover.strength * falloff * dt * 6;
-            if (add > edgeEnergy[e] * 0.2) setEdgeHot(e, CONFIG.color.hover);
-            edgeEnergy[e] = Math.min(1, edgeEnergy[e] + add);
-          }
-        }
-        for (let n = 0; n < nodeCount; n++) {
-          const d2 = nodes[n].distanceToSquared(hoverLocal);
-          if (d2 < r2) nodeEnergy[n] = Math.min(1, nodeEnergy[n] + (1 - d2 / r2) * dt * 6);
-        }
-        // re-illuminate growth segments whose midpoint falls in the hovered zone
-        for (let s = 0; s < segMax; s++) {
-          const o6 = s * 6;
-          const mx = (growPos[o6] + growPos[o6 + 3]) * 0.5;
-          const my = (growPos[o6 + 1] + growPos[o6 + 4]) * 0.5;
-          const mz = (growPos[o6 + 2] + growPos[o6 + 5]) * 0.5;
-          const dx = mx - hoverLocal.x, dy = my - hoverLocal.y, dz = mz - hoverLocal.z;
-          const d2 = dx * dx + dy * dy + dz * dz;
-          if (d2 < r2) segEnergy[s] = Math.min(1, segEnergy[s] + (1 - d2 / r2) * dt * 4);
-        }
-      }
-
-      // write energy -> additive colors (rest + energy*hot)
-      const cols = lineGeo.getAttribute("color");
-      for (let e = 0; e < edgeCount; e++) {
-        const en = edgeEnergy[e], o6 = e * 6, o3 = e * 3;
-        const rr = Math.min(1, rest.r + en * edgeHot[o3]);
-        const gg = Math.min(1, rest.g + en * edgeHot[o3 + 1]);
-        const bb = Math.min(1, rest.b + en * edgeHot[o3 + 2]);
-        cols.array[o6] = rr;     cols.array[o6 + 1] = gg;     cols.array[o6 + 2] = bb;
-        cols.array[o6 + 3] = rr; cols.array[o6 + 4] = gg;     cols.array[o6 + 5] = bb;
-      }
-      cols.needsUpdate = true;
-
-      const ncols = nodeGeo.getAttribute("color");
-      for (let n = 0; n < nodeCount; n++) {
-        const en = nodeEnergy[n], o = n * 3;
-        ncols.array[o]     = Math.min(1, nrest.r + en * nhot.r);
-        ncols.array[o + 1] = Math.min(1, nrest.g + en * nhot.g);
-        ncols.array[o + 2] = Math.min(1, nrest.b + en * nhot.b);
-      }
-      ncols.needsUpdate = true;
 
       // write growth-segment colors (heat * energy; additive → faded = invisible)
       if (segMax > 0) {
