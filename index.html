@@ -206,6 +206,7 @@
         probBend:   0.5,               // per-side bend probability
         probStraight: 0.8,             // straight-continuation probability
         clearanceFactor: 0.6,          // clearance = factor * segLength (spacing/forks)
+        cursorBias: 0.3,               // 0=ignore cursor, 1=grow hard toward it
         angleSlackDeg: 14,             // tolerance on the realized segment angle
         edgeTol:    0.5,               // off-surface reject (inert on a closed sphere)
         maxGen:     70,                // branch depth before a tip retires
@@ -405,7 +406,7 @@
     // Only ACTIVELY GROWING networks are tracked. Once a network saturates
     // (no live tips) it is dropped — its segments keep fading in the ring buffer.
     const networks = [];
-    const _N = new THREE.Vector3(), _seg = new THREE.Vector3();
+    const _N = new THREE.Vector3(), _seg = new THREE.Vector3(), _attr = new THREE.Vector3();
     const _target = new THREE.Vector3(), _pt2 = new THREE.Vector3(), _up = new THREE.Vector3();
 
     const cellOf = (p) => `${Math.round(p.x / clearance)},${Math.round(p.y / clearance)},${Math.round(p.z / clearance)}`;
@@ -465,6 +466,15 @@
       // project current dir into the surface tangent plane
       const dirTan = tip.dir.clone().addScaledVector(_N, -tip.dir.dot(_N));
       if (dirTan.lengthSq() < 1e-6) dirTan.crossVectors(_N, _up).normalize(); else dirTan.normalize();
+
+      // bias the heading toward the cursor's surface point (tangent-projected)
+      if (attractorActive) {
+        _attr.subVectors(attractorLocal, pt1).addScaledVector(_N, -_attr.dot(_N));
+        if (_attr.lengthSq() > 1e-6) {
+          dirTan.lerp(_attr.normalize(), G.cursorBias);
+          if (dirTan.lengthSq() > 1e-6) dirTan.normalize();
+        }
+      }
 
       const exA = pi, exB = net.parent[pi], exC = net.parent[exB];
       const rL = Math.random(), rR = Math.random(), rS = Math.random();
@@ -562,15 +572,38 @@
     }
 
     /* ============================================================
-       Interaction: cursor steers the sphere's rotation
+       Interaction: cursor steers rotation AND attracts growth.
+       A lightweight ray-sphere hit (no rendering) gives the surface point
+       under the cursor; growth biases its heading toward it.
        ============================================================ */
     const targetRot = new THREE.Vector2(0, 0);
     const steerInput = new THREE.Vector2(0, 0);
+    const pointerNDC = new THREE.Vector2(0, 0);
+    let pointerInside = false;
+
+    const raycaster = new THREE.Raycaster();
+    const hoverSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), CONFIG.sphere.radius);
+    const _hit = new THREE.Vector3();
+    const attractorLocal = new THREE.Vector3();
+    let attractorActive = false;
 
     window.addEventListener("pointermove", (ev) => {
-      steerInput.set((ev.clientX / window.innerWidth) * 2 - 1, -(ev.clientY / window.innerHeight) * 2 + 1);
+      pointerNDC.set((ev.clientX / window.innerWidth) * 2 - 1, -(ev.clientY / window.innerHeight) * 2 + 1);
+      steerInput.copy(pointerNDC);
+      pointerInside = true;
     });
-    window.addEventListener("pointerleave", () => steerInput.set(0, 0));
+    window.addEventListener("pointerleave", () => { steerInput.set(0, 0); pointerInside = false; });
+
+    function updateAttractor() {
+      attractorActive = false;
+      if (!pointerInside) return;
+      raycaster.setFromCamera(pointerNDC, camera);
+      hoverSphere.radius = CONFIG.sphere.radius * sculpture.scale.x;
+      if (!raycaster.ray.intersectSphere(hoverSphere, _hit)) return; // cursor off the sphere
+      attractorLocal.copy(_hit);
+      sculpture.worldToLocal(attractorLocal);
+      attractorActive = true;
+    }
 
     /* ============================================================
        Main loop
@@ -602,6 +635,9 @@
         const [s0, s1] = CONFIG.growth.spawnEvery;
         nextSpawnIn = s0 + Math.random() * (s1 - s0);
       }
+
+      // update the cursor attractor (surface point the growth leans toward)
+      updateAttractor();
 
       // breadth-first growth ticks (fixed cadence → slow, mechanical wavefront)
       growAccum += dt;
