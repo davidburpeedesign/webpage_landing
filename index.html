@@ -160,10 +160,7 @@
   <script type="module">
     import * as THREE from "three";
     import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
-    import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-    import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-    import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-    import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+    import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
 
     const REDUCE = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -227,7 +224,9 @@
       },
       breathing: { amp: REDUCE ? 0 : 0.01, speed: 0.7 },
       labels: { max: 38, life: [2.2, 4.2] },         // more data modules on the sphere
-      bloom:  { strength: 0.45, radius: 0.15, threshold: 0.35 }, // tight neon glow, no frame-wide haze
+      // Custom tight bloom: threshold-gate bright pixels, blur with a small
+      // fixed-pixel Gaussian (glow hugs the paths, never washes the void).
+      bloom:  { threshold: 0.22, knee: 0.18, strength: 1.15, blurPx: 1.25, iterations: 2 },
     };
 
     // weighted heat picker
@@ -255,19 +254,112 @@
     const sculpture = new THREE.Group();
     scene.add(sculpture);
 
-    // Post-processing: subtle bloom gives the bright additive paths a neon
-    // glow. Threshold sits above the void (#222) and the near-zero wireframe,
-    // so only the luminous paths smear — the background stays clean.
-    const _sz = renderer.getDrawingBufferSize(new THREE.Vector2());
-    const composerTarget = new THREE.WebGLRenderTarget(_sz.x, _sz.y, { type: THREE.HalfFloatType, samples: 4 });
-    const composer = new EffectComposer(renderer, composerTarget);
-    composer.addPass(new RenderPass(scene, camera));
-    const bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth, window.innerHeight),
-      CONFIG.bloom.strength, CONFIG.bloom.radius, CONFIG.bloom.threshold
-    );
-    composer.addPass(bloomPass);
-    composer.addPass(new OutputPass());
+    /* ============================================================
+       Custom tight bloom (replaces UnrealBloomPass, whose coarse mip
+       levels always smear a frame-wide haze over the mid-gray void).
+       Pipeline: scene → rtScene; threshold-gate bright pixels at half
+       res; small fixed-pixel separable Gaussian blur (ping-pong);
+       composite scene + glow*strength, encode to sRGB. The glow only
+       reaches ~blurPx*4 texels (half res) from a path, so the void and
+       the near-zero wireframe are never lifted.
+       ============================================================ */
+    const VERT = "attribute vec3 position;\nattribute vec2 uv;\nuniform mat4 modelViewMatrix;\nuniform mat4 projectionMatrix;\nvarying vec2 vUv;\nvoid main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }";
+
+    const thresholdQuad = new FullScreenQuad(new THREE.RawShaderMaterial({
+      uniforms: { tDiffuse: { value: null }, uThreshold: { value: 0 }, uKnee: { value: 0 } },
+      vertexShader: VERT,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        uniform sampler2D tDiffuse; uniform float uThreshold; uniform float uKnee;
+        varying vec2 vUv;
+        void main() {
+          vec3 c = texture2D(tDiffuse, vUv).rgb;
+          float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+          float f = smoothstep(uThreshold, uThreshold + uKnee, l);
+          gl_FragColor = vec4(c * f, 1.0);
+        }`,
+    }));
+
+    const blurQuad = new FullScreenQuad(new THREE.RawShaderMaterial({
+      uniforms: { tDiffuse: { value: null }, uDir: { value: new THREE.Vector2() } },
+      vertexShader: VERT,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        uniform sampler2D tDiffuse; uniform vec2 uDir;
+        varying vec2 vUv;
+        void main() {
+          vec3 s = texture2D(tDiffuse, vUv).rgb * 0.227027;
+          s += texture2D(tDiffuse, vUv + uDir * 1.0).rgb * 0.1945946;
+          s += texture2D(tDiffuse, vUv - uDir * 1.0).rgb * 0.1945946;
+          s += texture2D(tDiffuse, vUv + uDir * 2.0).rgb * 0.1216216;
+          s += texture2D(tDiffuse, vUv - uDir * 2.0).rgb * 0.1216216;
+          s += texture2D(tDiffuse, vUv + uDir * 3.0).rgb * 0.0540540;
+          s += texture2D(tDiffuse, vUv - uDir * 3.0).rgb * 0.0540540;
+          s += texture2D(tDiffuse, vUv + uDir * 4.0).rgb * 0.0162162;
+          s += texture2D(tDiffuse, vUv - uDir * 4.0).rgb * 0.0162162;
+          gl_FragColor = vec4(s, 1.0);
+        }`,
+    }));
+
+    const compositeQuad = new FullScreenQuad(new THREE.RawShaderMaterial({
+      uniforms: { tScene: { value: null }, tGlow: { value: null }, uStrength: { value: 0 } },
+      vertexShader: VERT,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        uniform sampler2D tScene; uniform sampler2D tGlow; uniform float uStrength;
+        varying vec2 vUv;
+        vec3 toSRGB(vec3 c) {
+          return mix(c * 12.92, 1.055 * pow(max(c, 0.0), vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+        }
+        void main() {
+          vec3 col = texture2D(tScene, vUv).rgb + texture2D(tGlow, vUv).rgb * uStrength;
+          gl_FragColor = vec4(toSRGB(col), 1.0);
+        }`,
+    }));
+
+    const rtScene   = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    const rtBrightA = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType });
+    const rtBrightB = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType });
+    const _dbs = new THREE.Vector2();
+    function sizeTargets() {
+      renderer.getDrawingBufferSize(_dbs);
+      const fw = Math.max(1, _dbs.x | 0), fh = Math.max(1, _dbs.y | 0);
+      rtScene.setSize(fw, fh);
+      rtBrightA.setSize(Math.max(1, fw >> 1), Math.max(1, fh >> 1));
+      rtBrightB.setSize(Math.max(1, fw >> 1), Math.max(1, fh >> 1));
+    }
+    sizeTargets();
+
+    function renderBloom() {
+      const B = CONFIG.bloom;
+      // 1. scene → rtScene (cleared to the void, additive paths on top)
+      renderer.setRenderTarget(rtScene);
+      renderer.render(scene, camera);
+      // 2. threshold-gate bright pixels → rtBrightA (half res)
+      thresholdQuad.material.uniforms.tDiffuse.value = rtScene.texture;
+      thresholdQuad.material.uniforms.uThreshold.value = B.threshold;
+      thresholdQuad.material.uniforms.uKnee.value = B.knee;
+      renderer.setRenderTarget(rtBrightA);
+      thresholdQuad.render(renderer);
+      // 3. small separable Gaussian, ping-pong A↔B
+      const bw = rtBrightA.width, bh = rtBrightA.height;
+      for (let i = 0; i < B.iterations; i++) {
+        blurQuad.material.uniforms.tDiffuse.value = rtBrightA.texture;
+        blurQuad.material.uniforms.uDir.value.set(B.blurPx / bw, 0);
+        renderer.setRenderTarget(rtBrightB);
+        blurQuad.render(renderer);
+        blurQuad.material.uniforms.tDiffuse.value = rtBrightB.texture;
+        blurQuad.material.uniforms.uDir.value.set(0, B.blurPx / bh);
+        renderer.setRenderTarget(rtBrightA);
+        blurQuad.render(renderer);
+      }
+      // 4. composite to the screen (linear → sRGB)
+      compositeQuad.material.uniforms.tScene.value = rtScene.texture;
+      compositeQuad.material.uniforms.tGlow.value = rtBrightA.texture;
+      compositeQuad.material.uniforms.uStrength.value = B.strength;
+      renderer.setRenderTarget(null);
+      compositeQuad.render(renderer);
+    }
 
     /* ============================================================
        Geodesic icosphere — Class-I subdivision at arbitrary frequency.
@@ -716,7 +808,7 @@
       dotsT += dt;
       if (dotsT > 0.4) { dotsT = 0; r.dots.textContent = ".".repeat((r.dots.textContent.length % 3) + 1); }
 
-      composer.render();
+      renderBloom();
       requestAnimationFrame(animate);
     }
     animate();
@@ -725,7 +817,7 @@
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
-      composer.setSize(window.innerWidth, window.innerHeight);
+      sizeTargets();
     });
   </script>
 </body>
