@@ -215,15 +215,15 @@
     // Live parameters (bound to the slider panel). Units are sphere-local.
     const P = {
       count: 1500,
-      maxSpeed: 0.020, maxForce: 0.0016, smoothing: 0.5,
-      flowStrength: 1.6, flowScale: 0.9, flowSpeed: 0.05,
-      sepStrength: 3.4, sepRadius: 0.13, sepEnabled: true,
-      cohStrength: 0.7, cohRadius: 0.34, cohEnabled: true,
-      aliStrength: 0.9, aliRadius: 0.26, aliEnabled: true,
-      seekStrength: 2.2, seekRadius: 2.6, seekEnabled: true,
-      lineLen: 0.06, agentAlpha: 0.55,
+      maxSpeed: 0.009, maxForce: 0.0004, smoothing: 0.56,
+      flowStrength: 2.0, flowScale: 0.45, flowSpeed: 0.005,
+      sepStrength: 2.0, sepRadius: 0.2, sepEnabled: true,
+      cohStrength: 1.75, cohRadius: 0.34, cohEnabled: true,
+      aliStrength: 1.5, aliRadius: 0.26, aliEnabled: true,
+      seekStrength: 2.0, seekRadius: 1.0, seekEnabled: true,
+      lineLen: 0.035, agentAlpha: 0.55,
       coralRadius: 0.9,                  // agents within this of the cursor tint coral
-      rotSpeed: 0.03, showSphere: true,
+      rotSpeed: 0.1, showSphere: true,
       bloom: { threshold: 0.16, knee: 0.10, strength: 0.95, blurPx: 1.0, iterations: 2 },
     };
     const CONFIG = P; // bloom pipeline reads CONFIG.bloom
