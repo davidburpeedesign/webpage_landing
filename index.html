@@ -222,6 +222,7 @@
       aliStrength: 0.9, aliRadius: 0.26, aliEnabled: true,
       seekStrength: 2.2, seekRadius: 2.6, seekEnabled: true,
       lineLen: 0.06, agentAlpha: 0.55,
+      coralRadius: 0.9,                  // agents within this of the cursor tint coral
       rotSpeed: 0.03, showSphere: true,
       bloom: { threshold: 0.16, knee: 0.10, strength: 0.95, blurPx: 1.0, iterations: 2 },
     };
@@ -406,7 +407,7 @@
        Faint reference sphere (icosahedron wireframe) — hints the form
        ============================================================ */
     const sphereWire = new THREE.LineSegments(
-      new THREE.WireframeGeometry(new THREE.IcosahedronGeometry(SPHERE_R, 3)),
+      new THREE.WireframeGeometry(new THREE.IcosahedronGeometry(SPHERE_R, 4)),
       new THREE.LineBasicMaterial({
         color: MX.bone.clone().multiplyScalar(0.05),
         transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
@@ -422,6 +423,7 @@
     const vx = new Float32Array(MAXN), vy = new Float32Array(MAXN), vz = new Float32Array(MAXN);
     const ax = new Float32Array(MAXN), ay = new Float32Array(MAXN), az = new Float32Array(MAXN);
     const sx = new Float32Array(MAXN), sy = new Float32Array(MAXN), sz = new Float32Array(MAXN); // smoothed accel
+    const coralAmt = new Float32Array(MAXN); // per-agent coral tint (eased toward cursor proximity)
     let initialized = 0;
 
     function initAgent(i) {
@@ -479,9 +481,12 @@
     });
     window.addEventListener("pointerleave", () => { pointerInside = false; });
 
+    // Resolve the cursor's surface point whenever the pointer is over the
+    // sphere. Independent of the seek FORCE (P.seekEnabled) so the coral
+    // proximity effect works even when steering is disabled.
     function updateSeek() {
       seekActive = false;
-      if (!pointerInside || !P.seekEnabled) return;
+      if (!pointerInside) return;
       raycaster.setFromCamera(pointerNDC, camera);
       if (!raycaster.ray.intersectSphere(hoverSphere, _hit)) return;
       seekLocal.copy(_hit);
@@ -540,7 +545,7 @@
         }
 
         // --- seek toward the cursor's surface point ---
-        if (seekActive) {
+        if (seekActive && P.seekEnabled) {
           const dx0 = seekLocal.x - px[i], dy0 = seekLocal.y - py[i], dz0 = seekLocal.z - pz[i];
           const dist = Math.hypot(dx0, dy0, dz0);
           if (dist > 1e-4 && dist < P.seekRadius) {
@@ -589,8 +594,10 @@
       fdx += P.flowSpeed*0.9*dtN; fdy += P.flowSpeed*1.1*dtN; fdz += P.flowSpeed*0.7*dtN;
     }
 
-    function writeAgentGeometry() {
+    function writeAgentGeometry(dtN) {
       const N = P.count, ll = P.lineLen, ms = P.maxSpeed;
+      const cr2 = P.coralRadius * P.coralRadius;
+      const ease = Math.min(1, 0.12 * dtN);          // gradual reveal/fade
       for (let i = 0; i < N; i++) {
         const sp = Math.hypot(vx[i], vy[i], vz[i]);
         const inv = sp > 1e-6 ? 1/sp : 0;
@@ -598,8 +605,20 @@
         const o6 = i*6;
         segPos[o6] = px[i]; segPos[o6+1] = py[i]; segPos[o6+2] = pz[i];
         segPos[o6+3] = px[i]+hx*ll; segPos[o6+4] = py[i]+hy*ll; segPos[o6+5] = pz[i]+hz*ll;
+
+        // coral proximity: target rises smoothly toward the cursor, eased over time
+        let target = 0;
+        if (seekActive) {
+          const dx = px[i]-seekLocal.x, dy = py[i]-seekLocal.y, dz = pz[i]-seekLocal.z;
+          const d2 = dx*dx + dy*dy + dz*dz;
+          if (d2 < cr2) { const t = 1 - Math.sqrt(d2/cr2); target = t*t*(3-2*t); } // smoothstep falloff
+        }
+        coralAmt[i] += (target - coralAmt[i]) * ease;
+
         const col = colorForSpeed(sp/ms);
-        const r = col.r*P.agentAlpha, g = col.g*P.agentAlpha, b = col.b*P.agentAlpha;
+        if (coralAmt[i] > 0.001) col.lerp(MX.coral, coralAmt[i]);
+        const alpha = P.agentAlpha * (1 + coralAmt[i] * 0.6);   // coral agents pop a little
+        const r = col.r*alpha, g = col.g*alpha, b = col.b*alpha;
         segCol[o6] = r; segCol[o6+1] = g; segCol[o6+2] = b;
         segCol[o6+3] = r; segCol[o6+4] = g; segCol[o6+5] = b;
       }
@@ -638,6 +657,20 @@
       b.addEventListener("click", onClick); pbody.appendChild(b);
     }
 
+    // Export all live parameters as a JSON file (and copy to clipboard) so
+    // tuned settings can be handed back and re-applied.
+    function exportParams() {
+      const data = JSON.stringify(P, null, 2);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const blob = new Blob([data], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `morphxgen-swarm-params_${stamp}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      if (navigator.clipboard) navigator.clipboard.writeText(data).catch(() => {});
+    }
+
     addGroup("flow field");
     addSlider("flowStrength", "strength", 0, 4, 0.05);
     addSlider("flowScale", "scale", 0.2, 3.0, 0.05);
@@ -656,16 +689,18 @@
     addToggle("aliEnabled", "alignment");
     addSlider("aliStrength", "ali strength", 0, 3, 0.05);
     addSlider("aliRadius", "ali radius", 0.08, 0.7, 0.01);
-    addGroup("cursor seek");
-    addToggle("seekEnabled", "enabled");
-    addSlider("seekStrength", "strength", 0, 6, 0.1);
-    addSlider("seekRadius", "radius", 0.3, 4.8, 0.1);
+    addGroup("cursor");
+    addToggle("seekEnabled", "seek force");
+    addSlider("seekStrength", "seek strength", 0, 6, 0.1);
+    addSlider("seekRadius", "seek radius", 0.3, 4.8, 0.1);
+    addSlider("coralRadius", "coral radius", 0.2, 2.4, 0.05);
     addGroup("render");
     addSlider("count", "agents", 100, 4000, 100, (v) => { P.count = v | 0; ensureAgents(P.count); });
     addSlider("lineLen", "streak", 0.01, 0.2, 0.005);
     addSlider("agentAlpha", "brightness", 0.05, 1.5, 0.05);
     addSlider("rotSpeed", "rotation", 0, 0.2, 0.005);
     addToggle("showSphere", "show sphere", (v) => { sphereWire.visible = v; });
+    addButton("export params", exportParams);
     addButton("reset swarm", () => reseed());
 
     // collapse toggle
@@ -688,7 +723,7 @@
 
       updateSeek();
       simulate(dtN);
-      writeAgentGeometry();
+      writeAgentGeometry(dtN);
 
       // slow idle rotation for depth (view-only; sim runs in local space)
       if (!REDUCE) sculpture.rotation.y += P.rotSpeed * dtN * 0.01;
