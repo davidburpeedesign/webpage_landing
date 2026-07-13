@@ -150,20 +150,24 @@
       host.insertBefore(mount, host.firstChild);
       createdMount = true;
     }
+    // Isolate a stacking context on the mount so mix-blend-mode on overlay
+    // content (e.g. a logo set to "difference") blends against the swarm and
+    // nothing behind the hero.
     if (getComputedStyle(mount).position === "static") mount.style.position = "relative";
+    mount.style.isolation = "isolate";
     const mountSize = () => ({ w: Math.max(1, mount.clientWidth), h: Math.max(1, mount.clientHeight) });
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(MX.void, 1);
-    // canvas fills the mount as a background layer; clicks pass through to content
-    renderer.domElement.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none";
-    // lift existing hero content above the swarm background
+    // Canvas is the background layer (first child, no z-index → does not form an
+    // isolating stacking context); clicks pass through to the content above it.
+    renderer.domElement.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none";
+    // Lift existing hero content above the swarm via position ONLY — NOT z-index,
+    // which would create a stacking context and break blending against the canvas.
     if (!createdMount) {
       for (const child of Array.from(mount.children)) {
-        const cs = getComputedStyle(child);
-        if (cs.position === "static") child.style.position = "relative";
-        if (cs.zIndex === "auto") child.style.zIndex = "1";
+        if (getComputedStyle(child).position === "static") child.style.position = "relative";
       }
     }
     mount.insertBefore(renderer.domElement, mount.firstChild);
