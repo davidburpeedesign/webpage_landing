@@ -5,182 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>morphxgen — swarm</title>
 
-  <!-- Brand webfonts: Intel One Mono (workhorse), Space Mono (display), Montserrat (wordmark) -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Intel+One+Mono:wght@400;500;600&family=Montserrat:wght@200;300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
-
   <style>
-    :root {
-      /* ---- MORPHXGEN tokens (authoritative) ---- */
-      --mx-void:        #222222;
-      --mx-void-deep:   #1a1a1a;
-      --mx-void-raise:  #2b2b2b;
-      --mx-bone:        #e4e3df;
-      --mx-white:       #ffffff;
-      --mx-coral:       #e48484;
-      --mx-coral-dim:   #b76a6a;
-
-      --mx-bone-08: rgba(228,227,223,0.08);
-      --mx-bone-16: rgba(228,227,223,0.16);
-      --mx-bone-24: rgba(228,227,223,0.24);
-      --mx-bone-40: rgba(228,227,223,0.40);
-      --mx-bone-55: rgba(228,227,223,0.55);
-      --mx-bone-72: rgba(228,227,223,0.72);
-
-      /* semantic aliases */
-      --bg:           var(--mx-void);
-      --text-primary: var(--mx-bone);
-      --text-emphasis:var(--mx-white);
-      --text-muted:   var(--mx-bone-55);
-      --text-faint:   var(--mx-bone-40);
-      --accent:       var(--mx-coral);
-      --line:         var(--mx-bone-16);
-      --line-soft:    var(--mx-bone-08);
-      --line-strong:  var(--mx-bone-24);
-
-      --font-display: "Space Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      --font-mono:    "Intel One Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      --font-sans:    "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-
-      --ls-wordmark: 0.10em; --ls-ui: 0.04em;
-      --ease-mech: cubic-bezier(0.65, 0, 0.35, 1);
-      --tick: 16px;
-    }
-
+    /* Standalone hero — swarm sphere only, no chrome. MORPHXGEN void #222. */
     * { margin: 0; padding: 0; box-sizing: border-box; }
-
     html, body {
       width: 100%; height: 100%;
       overflow: hidden;
-      background: var(--bg);            /* the void — never anything else */
-      color: var(--text-primary);
-      font-family: var(--font-mono);
-      cursor: crosshair;
+      background: #222222;   /* the void */
     }
-
-    #stage  { position: fixed; inset: 0; z-index: 1; }
-    canvas  { display: block; }
-
-    /* ---- Corner-tick bracket framing the viewport (signature motif) ---- */
-    #frame { position: fixed; inset: 22px; z-index: 5; pointer-events: none; }
-    #frame i { position: absolute; width: var(--tick); height: var(--tick); }
-    #frame .tl { top: 0;    left: 0;    border-top: 1px solid var(--line-strong); border-left: 1px solid var(--line-strong); }
-    #frame .tr { top: 0;    right: 0;   border-top: 1px solid var(--line-strong); border-right: 1px solid var(--line-strong); }
-    #frame .bl { bottom: 0; left: 0;    border-bottom: 1px solid var(--line-strong); border-left: 1px solid var(--line-strong); }
-    #frame .br { bottom: 0; right: 0;   border-bottom: 1px solid var(--line-strong); border-right: 1px solid var(--line-strong); }
-
-    /* ---- HUD chrome ---- */
-    #hud { position: fixed; left: 40px; top: 38px; z-index: 6; pointer-events: none; user-select: none; }
-    #hud .wordmark {
-      font-family: var(--font-sans);
-      font-weight: 500;
-      font-size: 22px;
-      letter-spacing: var(--ls-wordmark);
-      color: var(--text-emphasis);
-    }
-    #hud .sub {
-      margin-top: 12px;
-      font-size: 13px;
-      letter-spacing: var(--ls-ui);
-      color: var(--text-muted);
-    }
-    #hud .manifesto {
-      margin-top: 10px;
-      font-size: 13px;
-      letter-spacing: -0.01em;
-      color: var(--text-faint);
-      max-width: 280px;
-      line-height: 1.45;
-    }
-
-    #readout {
-      position: fixed; left: 40px; bottom: 36px; z-index: 6;
-      font-size: 12.5px;
-      letter-spacing: var(--ls-ui);
-      color: var(--text-faint);
-      pointer-events: none; user-select: none;
-    }
-    #readout b { color: var(--text-primary); font-weight: 500; }
-    #readout .status { color: var(--accent); }
-
-    /* ---- Control panel (functional; MORPHXGEN chrome — flat, hairline, square) ---- */
-    #panel {
-      position: fixed; top: 22px; right: 22px; z-index: 7;
-      width: 244px;
-      background: var(--mx-void-raise);
-      border: 1px solid var(--line);
-      font-family: var(--font-mono);
-      color: var(--text-muted);
-      user-select: none;
-    }
-    #panel .p-head {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 11px 13px;
-      border-bottom: 1px solid var(--line);
-      cursor: pointer;
-      color: var(--text-primary);
-      font-size: 12px; letter-spacing: var(--ls-ui);
-    }
-    #panel .p-head .chev { color: var(--text-faint); }
-    #panel .p-body { padding: 4px 13px 14px; max-height: 78vh; overflow-y: auto; }
-    #panel.collapsed .p-body { display: none; }
-    .p-group {
-      margin: 15px 0 6px; padding-bottom: 4px;
-      border-bottom: 1px solid var(--line-soft);
-      font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
-      color: var(--text-faint);
-    }
-    .p-row { margin: 10px 0; font-size: 11.5px; }
-    .p-row .rowhead { display: flex; justify-content: space-between; margin-bottom: 5px; }
-    .p-row .rowhead label { color: var(--text-muted); }
-    .p-row .rowhead .val { color: var(--text-primary); font-variant-numeric: tabular-nums; }
-    .p-row input[type=range] {
-      -webkit-appearance: none; appearance: none;
-      width: 100%; height: 2px; background: var(--line); outline: none;
-      accent-color: var(--accent);
-    }
-    .p-row input[type=range]::-webkit-slider-thumb {
-      -webkit-appearance: none; appearance: none;
-      width: 10px; height: 10px; border-radius: 0; background: var(--accent); cursor: pointer;
-    }
-    .p-row input[type=range]::-moz-range-thumb {
-      width: 10px; height: 10px; border-radius: 0; border: none; background: var(--accent); cursor: pointer;
-    }
-    .p-toggle { display: flex; align-items: center; justify-content: space-between; margin: 9px 0; font-size: 11.5px; }
-    .p-toggle label { color: var(--text-muted); }
-    .p-toggle input { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
-    .p-btn {
-      margin-top: 14px; width: 100%;
-      background: transparent; border: 1px solid var(--line-strong);
-      color: var(--text-primary); font-family: var(--font-mono);
-      font-size: 11px; letter-spacing: var(--ls-ui);
-      padding: 8px; cursor: pointer;
-    }
-    .p-btn:hover { border-color: var(--accent); color: var(--accent); }
-
-    @media (prefers-reduced-motion: reduce) { html, body { cursor: default; } }
+    #stage { position: fixed; inset: 0; z-index: 1; }
+    canvas { display: block; }
   </style>
 </head>
 <body>
   <div id="stage"></div>
-
-  <div id="frame"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
-
-  <div id="hud">
-    <div class="wordmark">MORPHXGEN</div>
-    <div class="sub">swarm // live</div>
-    <div class="manifesto">a thousand agents, one flow. form emerges from the field, not the plan.</div>
-  </div>
-
-  <div id="readout">
-    agents <b id="r-count">—</b> &nbsp;·&nbsp; <span class="status">flowing<span id="r-dots">...</span></span> &nbsp;·&nbsp; <b id="r-fps">—</b> fps
-  </div>
-
-  <div id="panel">
-    <div class="p-head" id="p-head"><span>swarm // controls</span><span class="chev" id="p-chev">–</span></div>
-    <div class="p-body" id="p-body"></div>
-  </div>
 
   <script type="importmap">
   {
@@ -223,10 +61,10 @@
       seekStrength: 2.0, seekRadius: 1.0, seekEnabled: true,
       lineLen: 0.035, agentAlpha: 0.55,
       coralRadius: 0.9,                  // agents within this of the cursor tint coral
-      rotSpeed: 0.1, showSphere: true,
+      rotSpeed: 0.1, showSphere: false,
       // optics
-      caStrength: 0.0035,                // radial chromatic aberration (0 = off)
-      dofEnabled: true, focalDist: 6.8, focalRange: 2.4, dofBlur: 0.14, // per-agent depth of field
+      caStrength: 0.009,                 // radial chromatic aberration (0 = off)
+      dofEnabled: true, focalDist: 6.0, focalRange: 2.6, dofBlur: 0.3, // per-agent depth of field
       bloom: { threshold: 0.16, knee: 0.10, strength: 0.95, blurPx: 1.0, iterations: 2 },
     };
     const CONFIG = P; // bloom pipeline reads CONFIG.bloom
@@ -423,6 +261,7 @@
         transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
       })
     );
+    sphereWire.visible = P.showSphere;
     sculpture.add(sphereWire);
 
     /* ============================================================
@@ -717,100 +556,9 @@
     }
 
     /* ============================================================
-       Control panel — live sliders bound to P
-       ============================================================ */
-    const pbody = document.getElementById("p-body");
-    const valEls = {};
-    function fmt(v, step) { const d = step < 0.01 ? 4 : step < 0.1 ? 3 : step < 1 ? 2 : 0; return v.toFixed(d); }
-    function addGroup(label) { const el = document.createElement("div"); el.className = "p-group"; el.textContent = label; pbody.appendChild(el); }
-    function addSlider(key, label, min, max, step, onChange) {
-      const row = document.createElement("div"); row.className = "p-row";
-      const head = document.createElement("div"); head.className = "rowhead";
-      const lab = document.createElement("label"); lab.textContent = label;
-      const val = document.createElement("span"); val.className = "val"; val.textContent = fmt(P[key], step);
-      head.appendChild(lab); head.appendChild(val);
-      const inp = document.createElement("input"); inp.type = "range"; inp.min = min; inp.max = max; inp.step = step; inp.value = P[key];
-      inp.addEventListener("input", () => { P[key] = parseFloat(inp.value); val.textContent = fmt(P[key], step); if (onChange) onChange(P[key]); });
-      row.appendChild(head); row.appendChild(inp); pbody.appendChild(row);
-      valEls[key] = val;
-    }
-    function addToggle(key, label, onChange) {
-      const row = document.createElement("div"); row.className = "p-toggle";
-      const lab = document.createElement("label"); lab.textContent = label;
-      const inp = document.createElement("input"); inp.type = "checkbox"; inp.checked = P[key];
-      inp.addEventListener("change", () => { P[key] = inp.checked; if (onChange) onChange(P[key]); });
-      row.appendChild(lab); row.appendChild(inp); pbody.appendChild(row);
-    }
-    function addButton(label, onClick) {
-      const b = document.createElement("button"); b.className = "p-btn"; b.textContent = label;
-      b.addEventListener("click", onClick); pbody.appendChild(b);
-    }
-
-    // Export all live parameters as a JSON file (and copy to clipboard) so
-    // tuned settings can be handed back and re-applied.
-    function exportParams() {
-      const data = JSON.stringify(P, null, 2);
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const blob = new Blob([data], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = `morphxgen-swarm-params_${stamp}.json`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-      if (navigator.clipboard) navigator.clipboard.writeText(data).catch(() => {});
-    }
-
-    addGroup("flow field");
-    addSlider("flowStrength", "strength", 0, 4, 0.05);
-    addSlider("flowScale", "scale", 0.2, 3.0, 0.05);
-    addSlider("flowSpeed", "evolve", 0, 0.4, 0.005);
-    addGroup("motion");
-    addSlider("maxSpeed", "max speed", 0.004, 0.06, 0.001);
-    addSlider("maxForce", "max force", 0.0004, 0.006, 0.0002);
-    addSlider("smoothing", "smoothing", 0, 0.95, 0.01);
-    addGroup("flocking");
-    addToggle("sepEnabled", "separation");
-    addSlider("sepStrength", "sep strength", 0, 8, 0.1);
-    addSlider("sepRadius", "sep radius", 0.04, 0.4, 0.01);
-    addToggle("cohEnabled", "cohesion");
-    addSlider("cohStrength", "coh strength", 0, 3, 0.05);
-    addSlider("cohRadius", "coh radius", 0.1, 0.8, 0.01);
-    addToggle("aliEnabled", "alignment");
-    addSlider("aliStrength", "ali strength", 0, 3, 0.05);
-    addSlider("aliRadius", "ali radius", 0.08, 0.7, 0.01);
-    addGroup("cursor");
-    addToggle("seekEnabled", "seek force");
-    addSlider("seekStrength", "seek strength", 0, 6, 0.1);
-    addSlider("seekRadius", "seek radius", 0.3, 4.8, 0.1);
-    addSlider("coralRadius", "coral radius", 0.2, 2.4, 0.05);
-    addGroup("render");
-    addSlider("count", "agents", 100, 4000, 100, (v) => { P.count = v | 0; ensureAgents(P.count); });
-    addSlider("lineLen", "streak", 0.01, 0.2, 0.005);
-    addSlider("agentAlpha", "brightness", 0.05, 1.5, 0.05);
-    addSlider("rotSpeed", "rotation", 0, 0.2, 0.005);
-    addToggle("showSphere", "show sphere", (v) => { sphereWire.visible = v; });
-    addGroup("optics");
-    addSlider("caStrength", "aberration", 0, 0.02, 0.0005);
-    addToggle("dofEnabled", "depth of field");
-    addSlider("focalDist", "focal dist", 5.8, 10.6, 0.05);
-    addSlider("focalRange", "focal range", 0.4, 5.0, 0.05);
-    addSlider("dofBlur", "blur", 0, 0.3, 0.005);
-    addButton("export params", exportParams);
-    addButton("reset swarm", () => reseed());
-
-    // collapse toggle
-    const panel = document.getElementById("panel");
-    document.getElementById("p-head").addEventListener("click", () => {
-      panel.classList.toggle("collapsed");
-      document.getElementById("p-chev").textContent = panel.classList.contains("collapsed") ? "+" : "–";
-    });
-
-    /* ============================================================
        Main loop
        ============================================================ */
-    const rc = document.getElementById("r-count"), rfps = document.getElementById("r-fps"), rdots = document.getElementById("r-dots");
     const clock = new THREE.Clock();
-    let dotsT = 0, fpsT = 0, fpsAcc = 0, fpsN = 0;
 
     function animate() {
       const dt = Math.min(clock.getDelta(), 0.05);
@@ -831,12 +579,6 @@
       if (!REDUCE) sculpture.rotation.y += P.rotSpeed * dtN * 0.01;
 
       renderBloom();
-
-      // readout
-      rc.textContent = P.count;
-      fpsAcc += 1/Math.max(dt, 1e-3); fpsN++; fpsT += dt;
-      if (fpsT > 0.4) { rfps.textContent = Math.round(fpsAcc/fpsN); fpsAcc = 0; fpsN = 0; fpsT = 0; }
-      dotsT += dt; if (dotsT > 0.4) { dotsT = 0; rdots.textContent = ".".repeat((rdots.textContent.length % 3) + 1); }
 
       requestAnimationFrame(animate);
     }
