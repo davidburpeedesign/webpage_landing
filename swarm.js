@@ -104,24 +104,37 @@
     /* ============================================================
        Scene + renderer
        ============================================================ */
-    // Mount: use an existing container (#swarm-stage or #stage); otherwise
-    // create a full-height void hero section and prepend it above the page
-    // content. This lets the same engine run standalone or embedded in a page.
-    let mount = document.getElementById("swarm-stage") || document.getElementById("stage");
+    // Mount: prefer an explicit slot (#swarm-stage), then the page's hero
+    // section (.mx-hero), then the standalone stage; only create a container
+    // as a last resort. The canvas renders as a background layer that fills
+    // the mount, so existing hero content sits on top of the swarm.
+    let mount = document.getElementById("swarm-stage") || document.querySelector(".mx-hero") || document.getElementById("stage");
+    let createdMount = false;
     if (!mount) {
       mount = document.createElement("div");
       mount.id = "swarm-stage";
       mount.style.cssText = "position:relative;width:100%;height:100vh;background:#222222;overflow:hidden";
       const host = document.querySelector(".mx-page") || document.body;
       host.insertBefore(mount, host.firstChild);
+      createdMount = true;
     }
+    if (getComputedStyle(mount).position === "static") mount.style.position = "relative";
     const mountSize = () => ({ w: Math.max(1, mount.clientWidth), h: Math.max(1, mount.clientHeight) });
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(MX.void, 1);
-    renderer.domElement.style.cssText = "display:block;width:100%;height:100%";
-    mount.appendChild(renderer.domElement);
+    // canvas fills the mount as a background layer; clicks pass through to content
+    renderer.domElement.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none";
+    // lift existing hero content above the swarm background
+    if (!createdMount) {
+      for (const child of Array.from(mount.children)) {
+        const cs = getComputedStyle(child);
+        if (cs.position === "static") child.style.position = "relative";
+        if (cs.zIndex === "auto") child.style.zIndex = "1";
+      }
+    }
+    mount.insertBefore(renderer.domElement, mount.firstChild);
 
     let _ms = mountSize();
     renderer.setSize(_ms.w, _ms.h, false);   // false → keep our 100% CSS sizing
