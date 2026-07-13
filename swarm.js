@@ -1,35 +1,3 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>morphxgen — swarm</title>
-
-  <style>
-    /* Standalone hero — swarm sphere only, no chrome. MORPHXGEN void #222. */
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-      width: 100%; height: 100%;
-      overflow: hidden;
-      background: #222222;   /* the void */
-    }
-    #stage { position: fixed; inset: 0; z-index: 1; }
-    canvas { display: block; }
-  </style>
-</head>
-<body>
-  <div id="stage"></div>
-
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-    }
-  }
-  </script>
-
-  <script type="module">
     import * as THREE from "three";
     import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
 
@@ -629,6 +597,4 @@
     }
     if (window.ResizeObserver) new ResizeObserver(onResize).observe(mount);
     window.addEventListener("resize", onResize);
-  </script>
-</body>
-</html>
+  
