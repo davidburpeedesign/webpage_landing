@@ -25,7 +25,7 @@
 
     // Live parameters — same set/values as the sphere hero. Units are world-space.
     const P = {
-      count: 1500,
+      count: 1000,
       maxSpeed: 0.009, maxForce: 0.0004, smoothing: 0.56,
       flowStrength: 2.0, flowScale: 0.45, flowSpeed: 0.005,
       sepStrength: 2.0, sepRadius: 0.2, sepEnabled: true,
