@@ -26,13 +26,13 @@
     // Live parameters — same set/values as the sphere hero. Units are world-space.
     const P = {
       count: 1000,
-      maxSpeed: 0.009, maxForce: 0.0004, smoothing: 0.56,
+      maxSpeed: 0.0045, maxForce: 0.0004, smoothing: 0.56,
       flowStrength: 2.0, flowScale: 0.45, flowSpeed: 0.005,
       sepStrength: 2.0, sepRadius: 0.2, sepEnabled: true,
       cohStrength: 1.75, cohRadius: 0.34, cohEnabled: true,
       aliStrength: 1.5, aliRadius: 0.26, aliEnabled: true,
       seekStrength: 2.0, seekRadius: 1.0, seekEnabled: true,
-      lineLen: 0.035, agentAlpha: 0.55,
+      lineLen: 0.035, agentAlpha: 0.35,
       coralRadius: 0.9,                  // agents within this of the cursor tint coral
       rotSpeed: 0.1, showSphere: false,  // rotSpeed unused on a plane (kept for parity)
       // optics
