@@ -36,9 +36,9 @@
       coralRadius: 0.9,                  // agents within this of the cursor tint coral
       rotSpeed: 0.1, showSphere: false,  // rotSpeed unused on a plane (kept for parity)
       // optics
-      caStrength: 0.009,                 // radial chromatic aberration (0 = off)
-      dofEnabled: false, focalDist: 6.0, focalRange: 2.6, dofBlur: 0.3, // per-agent depth of field
-      bloom: { threshold: 0.16, knee: 0.10, strength: 0.5, blurPx: 1.0, iterations: 2 },
+      caStrength: 0.0045,                 // radial chromatic aberration (0 = off)
+      dofEnabled: true, focalDist: 6.0, focalRange: 2.6, dofBlur: 0.3, // per-agent depth of field
+      bloom: { threshold: 0.16, knee: 0.10, strength: 0.95, blurPx: 1.0, iterations: 2 },
     };
     const CONFIG = P; // bloom pipeline reads CONFIG.bloom
 
