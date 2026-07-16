@@ -489,3 +489,25 @@
     }
     if (window.ResizeObserver) new ResizeObserver(onResize).observe(mount);
     window.addEventListener("resize", onResize);
+
+    /* ============================================================
+       External control hook — lets a dev harness (glyph-dev.html) or the
+       browser console drive the live parameters via window.MXGLYPH.P, plus
+       the few actions that need a re-apply (cell count, reference sphere,
+       reseed). Most of P is read every frame so it tunes live; count and
+       showSphere are applied once, hence the explicit helpers. Inert when
+       embedded on the site — nothing reads it unless a panel is wired up.
+       ============================================================ */
+    if (typeof window !== "undefined") {
+      window.MXGLYPH = {
+        P,
+        rebuild() {                       // re-lay the Fibonacci grid (after a count change)
+          initCells();
+          glyphGeo.setDrawRange(0, Math.min(P.count, MAXN));
+          glyphGeo.getAttribute("position").needsUpdate = true;
+        },
+        reseed() { Noise.seed(Date.now()); },   // fresh noise field
+        setShowSphere(v) { P.showSphere = !!v; sphereWire.visible = P.showSphere; },
+      };
+      window.dispatchEvent(new Event("mxglyph:ready"));
+    }

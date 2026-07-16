@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>morphxgen — glyph sphere (dev)</title>
+
+  <!--
+    DEV HARNESS. Loads the engine by <script src> (NOT an embedded copy), so
+    the iteration loop is: edit glyph-sphere.js → refresh. The shipped
+    glyph.html keeps the embedded copy for Webflow/jsDelivr parity.
+
+    Adds a self-contained MORPHXGEN-styled control panel bound to the engine's
+    live parameters (window.MXGLYPH.P). Serve over http (e.g. `python3 -m
+    http.server`) rather than opening via file:// so the ES-module import map
+    resolves.
+  -->
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #222222; }
+    #stage { position: fixed; inset: 0; z-index: 1; }
+    canvas { display: block; }
+
+    /* ---- control panel (MORPHXGEN: void/bone/coral, mono, hairline, square) ---- */
+    #mx-panel {
+      position: fixed; top: 14px; right: 14px; z-index: 10;
+      width: 268px; max-height: calc(100vh - 28px); overflow-y: auto;
+      background: rgba(18,18,18,0.86);
+      border: 1px solid rgba(228,227,223,0.20);
+      color: #e4e3df;
+      font: 11px/1.5 "Space Mono", "Intel One Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0.02em;
+      accent-color: #e48484;               /* coral slider/checkbox fill */
+      -webkit-font-smoothing: antialiased;
+    }
+    #mx-panel .hd {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 9px 11px; cursor: pointer; user-select: none;
+      border-bottom: 1px solid rgba(228,227,223,0.14);
+      text-transform: uppercase; letter-spacing: 0.14em; font-size: 10px;
+    }
+    #mx-panel .hd .dot { color: #e48484; }
+    #mx-panel .body { padding: 4px 11px 11px; }
+    #mx-panel.closed .body { display: none; }
+    #mx-panel .grp {
+      margin: 11px 0 5px; padding-top: 7px;
+      border-top: 1px solid rgba(228,227,223,0.10);
+      text-transform: uppercase; letter-spacing: 0.14em;
+      font-size: 9px; color: rgba(228,227,223,0.55);
+    }
+    #mx-panel .grp:first-child { margin-top: 4px; border-top: none; }
+    #mx-panel .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; margin: 6px 0; }
+    #mx-panel .row label { color: rgba(228,227,223,0.82); }
+    #mx-panel .row .val { text-align: right; color: #e4e3df; font-variant-numeric: tabular-nums; min-width: 46px; }
+    #mx-panel input[type=range] { grid-column: 1 / -1; width: 100%; height: 16px; margin: 0; background: transparent; cursor: ew-resize; }
+    #mx-panel .rowbool { display: flex; align-items: center; justify-content: space-between; margin: 6px 0; }
+    #mx-panel .rowbool input { width: 14px; height: 14px; cursor: pointer; }
+    #mx-panel .btns { display: flex; gap: 6px; margin-top: 12px; }
+    #mx-panel button {
+      flex: 1; padding: 7px 4px; cursor: pointer;
+      background: transparent; color: #e4e3df;
+      border: 1px solid rgba(228,227,223,0.28);
+      font: inherit; text-transform: uppercase; letter-spacing: 0.1em; font-size: 9px;
+      transition: border-color 140ms cubic-bezier(0.65,0,0.35,1), color 140ms cubic-bezier(0.65,0,0.35,1);
+    }
+    #mx-panel button:hover { border-color: #e48484; color: #e48484; }
+    #mx-panel .note { margin-top: 9px; font-size: 9px; color: rgba(228,227,223,0.4); line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <!-- engine, loaded by src (single source of truth) -->
+  <script type="module" src="./glyph-sphere.js"></script>
+
+  <!-- control panel -->
+  <script>
+  (function () {
+    // Main design parameters exposed to the panel. `rebuild` params re-lay the
+    // grid; `showSphere` toggles the reference wireframe; the rest tune live.
+    const SPEC = [
+      { grp: "field" },
+      { k: "count",        min: 100,  max: 4000, step: 50,    rebuild: true },
+      { k: "flowScale",    min: 0.1,  max: 1.5,  step: 0.01 },
+      { k: "flowSpeed",    min: 0,    max: 0.03, step: 0.001 },
+      { k: "valueContrast",min: 0.5,  max: 3,    step: 0.05 },
+      { grp: "glyphs" },
+      { k: "glyphSize",    min: 0.1,  max: 1.2,  step: 0.01 },
+      { k: "glyphAlpha",   min: 0,    max: 1,    step: 0.01 },
+      { k: "coralRadius",  min: 0,    max: 2,    step: 0.05 },
+      { grp: "depth of field" },
+      { k: "dofEnabled",   bool: true },
+      { k: "focalDist",    min: 3,    max: 11,   step: 0.1 },
+      { k: "focalRange",   min: 0.3,  max: 6,    step: 0.1 },
+      { k: "dofGrow",      min: 0,    max: 3,    step: 0.05 },
+      { grp: "optics" },
+      { k: "caStrength",       min: 0, max: 0.03, step: 0.001 },
+      { k: "bloom.threshold",  min: 0, max: 0.5,  step: 0.01 },
+      { k: "bloom.strength",   min: 0, max: 2,    step: 0.05 },
+      { k: "bloom.knee",       min: 0, max: 0.5,  step: 0.01 },
+      { grp: "scene" },
+      { k: "rotSpeed",     min: 0,   max: 1,    step: 0.01 },
+      { k: "showSphere",   bool: true, showSphere: true },
+    ];
+
+    const get = (o, path) => path.split(".").reduce((a, p) => a[p], o);
+    const set = (o, path, v) => { const ps = path.split("."); const last = ps.pop(); ps.reduce((a, p) => a[p], o)[last] = v; };
+    const fmt = (v) => (Number.isInteger(v) ? String(v) : (Math.abs(v) < 1 ? v.toFixed(3) : v.toFixed(2)));
+
+    function build(api) {
+      const P = api.P;
+      const DEFAULTS = JSON.parse(JSON.stringify(P));   // snapshot for reset
+
+      const panel = document.createElement("div");
+      panel.id = "mx-panel";
+      const hd = document.createElement("div");
+      hd.className = "hd";
+      hd.innerHTML = '<span>glyph sphere <span class="dot">●</span></span><span class="tgl">–</span>';
+      const body = document.createElement("div");
+      body.className = "body";
+      panel.append(hd, body);
+      document.body.appendChild(panel);
+
+      hd.addEventListener("click", () => {
+        panel.classList.toggle("closed");
+        hd.querySelector(".tgl").textContent = panel.classList.contains("closed") ? "+" : "–";
+      });
+
+      const readouts = [];   // {el, k}
+      const inputs = [];     // {el, k, bool}
+
+      for (const f of SPEC) {
+        if (f.grp) { const g = document.createElement("div"); g.className = "grp"; g.textContent = f.grp; body.appendChild(g); continue; }
+
+        if (f.bool) {
+          const row = document.createElement("div");
+          row.className = "rowbool";
+          const lab = document.createElement("label"); lab.textContent = f.k;
+          const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!get(P, f.k);
+          cb.addEventListener("change", () => {
+            if (f.showSphere) api.setShowSphere(cb.checked); else set(P, f.k, cb.checked);
+          });
+          row.append(lab, cb); body.appendChild(row);
+          inputs.push({ el: cb, k: f.k, bool: true, showSphere: f.showSphere });
+          continue;
+        }
+
+        const row = document.createElement("div");
+        row.className = "row";
+        const lab = document.createElement("label"); lab.textContent = f.k;
+        const val = document.createElement("span"); val.className = "val"; val.textContent = fmt(get(P, f.k));
+        const rng = document.createElement("input");
+        rng.type = "range"; rng.min = f.min; rng.max = f.max; rng.step = f.step; rng.value = get(P, f.k);
+        rng.addEventListener("input", () => {
+          const v = parseFloat(rng.value);
+          set(P, f.k, v); val.textContent = fmt(v);
+          if (f.rebuild) api.rebuild();
+        });
+        row.append(lab, val, rng); body.appendChild(row);
+        readouts.push({ el: val, k: f.k });
+        inputs.push({ el: rng, k: f.k });
+      }
+
+      // actions
+      const btns = document.createElement("div");
+      btns.className = "btns";
+      const bReseed = document.createElement("button"); bReseed.textContent = "reseed";
+      const bReset  = document.createElement("button"); bReset.textContent = "reset";
+      const bCopy   = document.createElement("button"); bCopy.textContent = "copy json";
+      btns.append(bReseed, bReset, bCopy);
+      body.appendChild(btns);
+
+      const note = document.createElement("div");
+      note.className = "note";
+      note.textContent = "live params: window.MXGLYPH.P — click header to collapse.";
+      body.appendChild(note);
+
+      const syncUI = () => {
+        for (const i of inputs) {
+          if (i.bool) i.el.checked = !!get(P, i.k);
+          else i.el.value = get(P, i.k);
+        }
+        for (const r of readouts) r.el.textContent = fmt(get(P, r.k));
+      };
+
+      bReseed.addEventListener("click", () => api.reseed());
+      bReset.addEventListener("click", () => {
+        const d = JSON.parse(JSON.stringify(DEFAULTS));
+        for (const key in d) P[key] = (typeof d[key] === "object" && d[key]) ? Object.assign(P[key] || {}, d[key]) : d[key];
+        api.setShowSphere(P.showSphere);
+        api.rebuild();
+        syncUI();
+      });
+      bCopy.addEventListener("click", async () => {
+        const json = JSON.stringify(P, null, 2);
+        try { await navigator.clipboard.writeText(json); bCopy.textContent = "copied ✓"; }
+        catch { console.log(json); bCopy.textContent = "logged"; }
+        setTimeout(() => (bCopy.textContent = "copy json"), 1200);
+      });
+    }
+
+    if (window.MXGLYPH) build(window.MXGLYPH);
+    else window.addEventListener("mxglyph:ready", () => build(window.MXGLYPH), { once: true });
+  })();
+  </script>
+</body>
+</html>
